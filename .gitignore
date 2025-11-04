@@ -4,7 +4,6 @@ __pycache__/
 trade_cache.json
 # reverse-engineering artifacts (HTML/JS dumps, docs copies, etc.)
 *.html
-*.md
 main.js
 main.js.map
 main.pretty.js
