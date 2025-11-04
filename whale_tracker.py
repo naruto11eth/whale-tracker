@@ -458,3 +458,47 @@ def run_tracker(args: argparse.Namespace) -> None:
         except RuntimeError:
             pass
 
+def run_sentiment(args: argparse.Namespace) -> None:
+    lookback_seconds = int(args.sentiment_lookback * 3600)
+    cache = load_cache(args.storage_file, lookback_seconds)
+    coin = args.sentiment.upper()
+    trades = cache.recent(coin)
+
+    if len(trades) < 20:
+        info = Info(skip_ws=True)
+        extra_trades = fetch_recent(info, coin)
+        for trade in extra_trades:
+            cache.add(trade)
+        trades = cache.recent(coin)
+
+    if not trades:
+        print(f"No trades available for {coin} within lookback window.")
+        return
+
+    longs = [t for t in trades if t.direction == "long"]
+    shorts = [t for t in trades if t.direction == "short"]
+    total = len(trades)
+    long_notional = sum((t.notional_usd for t in longs), Decimal("0"))
+    short_notional = sum((t.notional_usd for t in shorts), Decimal("0"))
+    headers = [
+        "Coin",
+        "Total Trades",
+        "Long %",
+        "Short %",
+        "Long Notional",
+        "Short Notional",
+    ]
+    long_pct = f"{(len(longs) / total) * 100:.2f}%"
+    short_pct = f"{(len(shorts) / total) * 100:.2f}%"
+    rows = [
+        [
+            coin,
+            str(total),
+            long_pct,
+            short_pct,
+            format_notional(long_notional),
+            format_notional(short_notional),
+        ]
+    ]
+    print_table(headers, rows)
+
