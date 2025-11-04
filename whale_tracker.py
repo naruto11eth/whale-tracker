@@ -318,4 +318,143 @@ def run_tracker(args: argparse.Namespace) -> None:
         if coin and ctx_payload:
             set_ctx(coin, ctx_payload)
 
-    
+    # Seed recent trades and websocket subscriptions.
+    for coin in args.coins:
+        for trade in fetch_recent(info, coin):
+            cache.add(trade)
+        info.subscribe({"type": "trades", "coin": coin}, on_ws_trades)
+        info.subscribe({"type": "activeAssetCtx", "coin": coin}, on_ws_asset_ctx)
+
+    cache.prune_all()
+
+    now_ms = int(time.time() * 1000)
+    for trade in cache.all_recent(now_ms):
+        if trade.notional_usd >= threshold:
+            reported[trade.coin].add(f"{trade.tid}:{trade.time_ms}")
+
+    if args.print_startup_summary:
+        big_trades = sorted(
+            [t for t in cache.all_recent(now_ms) if t.notional_usd >= threshold],
+            key=lambda t: t.time_ms,
+        )
+        if big_trades:
+            print("Existing large trades within lookback window:")
+            headers = [
+                "Time (UTC)",
+                "Coin",
+                "Dir",
+                "Size",
+                "Price",
+                "Notional",
+            ]
+            rows = [
+                [
+                    time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.gmtime(trade.time_ms / 1000)
+                    ),
+                    trade.coin,
+                    trade.direction.upper(),
+                    str(trade.size.normalize()),
+                    str(trade.price.normalize()),
+                    format_notional(trade.notional_usd),
+                ]
+                for trade in big_trades
+            ]
+            print_table(headers, rows)
+        else:
+            print("No large trades cached within lookback window.")
+
+    last_save = time.time()
+    try:
+        while not stop_event.is_set():
+            try:
+                trade = trade_queue.get(timeout=0.5)
+            except Empty:
+                if args.storage_file and time.time() - last_save >= args.save_interval:
+                    save_cache(args.storage_file, cache)
+                    last_save = time.time()
+                continue
+
+            trade_queue.task_done()
+            if not cache.add(trade):
+                continue
+
+            key = f"{trade.tid}:{trade.time_ms}"
+            if trade.notional_usd >= threshold:
+                cutoff = cache.cutoff(None)
+                if trade.time_ms >= cutoff and key not in reported[trade.coin]:
+                    reported[trade.coin].add(key)
+                    with ctx_lock:
+                        ctx = asset_ctx.get(trade.coin.upper())
+                    mark_px = ctx.mark_px if ctx else None
+                    mid_px = ctx.mid_px if ctx else None
+                    pnl = compute_pnl_vs_mark(trade, mark_px)
+                    funding_effect = compute_funding_effect(
+                        trade, ctx.funding_rate if ctx else None
+                    )
+                    headers = [
+                        "Time (UTC)",
+                        "Coin",
+                        "Dir",
+                        "Size",
+                        "Trade Px",
+                        "Notional",
+                        "Mark Px",
+                        "Mid Px",
+                        "Impact Bid",
+                        "Impact Ask",
+                        "PnL vs Mark",
+                        "Funding Rate",
+                        "Funding Impact",
+                    ]
+                    row = [
+                        time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.gmtime(trade.time_ms / 1000)
+                        ),
+                        trade.coin,
+                        trade.direction.upper(),
+                        str(trade.size.normalize()),
+                        str(trade.price.normalize()),
+                        format_notional(trade.notional_usd),
+                        str(mark_px.normalize())
+                        if mark_px is not None
+                        else "N/A",
+                        str(mid_px.normalize()) if mid_px is not None else "N/A",
+                        str(ctx.impact_bid.normalize())
+                        if ctx and ctx.impact_bid is not None
+                        else "N/A",
+                        str(ctx.impact_ask.normalize())
+                        if ctx and ctx.impact_ask is not None
+                        else "N/A",
+                        format_notional(pnl) if pnl is not None else "N/A",
+                        str(ctx.funding_rate)
+                        if ctx and ctx.funding_rate is not None
+                        else "N/A",
+                        format_notional(funding_effect)
+                        if funding_effect is not None
+                        else "N/A",
+                    ]
+                    if args.show_users:
+                        headers += ["Taker", "Maker"]
+                        row += [trade.users[0], trade.users[1]]
+                    print_table(headers, [row])
+
+            if args.storage_file and time.time() - last_save >= args.save_interval:
+                save_cache(args.storage_file, cache)
+                last_save = time.time()
+        
+        # ensure queue is drained before exit
+        while not trade_queue.empty():
+            try:
+                trade_queue.get_nowait()
+                trade_queue.task_done()
+            except Empty:
+                break
+    finally:
+        if args.storage_file:
+            save_cache(args.storage_file, cache)
+        try:
+            info.disconnect_websocket()
+        except RuntimeError:
+            pass
+
