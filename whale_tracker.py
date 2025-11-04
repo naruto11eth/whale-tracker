@@ -502,3 +502,69 @@ def run_sentiment(args: argparse.Namespace) -> None:
     ]
     print_table(headers, rows)
 
+def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Monitor HyperLiquid trades above a notional threshold."
+    )
+    parser.add_argument(
+        "--coins",
+        nargs="+",
+        default=["BTC", "ETH"],
+        help="List of coins to monitor (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=Decimal,
+        default=DEFAULT_THRESHOLD_USD,
+        help="Notional USD threshold for highlighting trades (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--lookback-hours",
+        type=float,
+        default=DEFAULT_LOOKBACK_HOURS,
+        help="Hours to retain trades in memory and cache (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--storage-file",
+        default=DEFAULT_STORAGE_PATH,
+        help="Optional path to persist trades between runs (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=DEFAULT_SAVE_INTERVAL_SECONDS,
+        help="Seconds between cache flushes to disk (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--show-users",
+        action="store_true",
+        help="Display taker/maker addresses in alerts.",
+    )
+    parser.add_argument(
+        "--sentiment",
+        help="Print sentiment for the specified coin and exit.",
+    )
+    parser.add_argument(
+        "--sentiment-lookback",
+        type=float,
+        default=DEFAULT_LOOKBACK_HOURS,
+        help="Lookback window in hours for sentiment mode (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--no-startup-summary",
+        action="store_false",
+        dest="print_startup_summary",
+        help="Skip listing cached large trades on startup.",
+    )
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    try:
+        if cli_args.sentiment:
+            run_sentiment(cli_args)
+        else:
+            run_tracker(cli_args)
+    except KeyboardInterrupt:
+        pass
