@@ -260,3 +260,62 @@ def compute_funding_effect(
     if trade.direction == "short":
         effect = -effect
     return effect
+
+def run_tracker(args: argparse.Namespace) -> None:
+    lookback_seconds = int(args.lookback_hours * 3600)
+    threshold = Decimal(str(args.threshold))
+    cache = load_cache(args.storage_file, lookback_seconds)
+
+    stop_event = threading.Event()
+    trade_queue: "Queue[Trade]" = Queue()
+    reported: Dict[str, Set[str]] = defaultdict(set)
+
+    def handle_signal(signum, _frame):
+        print(f"Received signal {signum}, shutting down...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    info = Info()  # websocket manager spins up in background
+
+    ctx_lock = threading.Lock()
+    asset_ctx: Dict[str, AssetContext] = {}
+
+    def set_ctx(coin: str, ctx_payload: Dict) -> None:
+        ctx = AssetContext(
+            coin=coin,
+            mark_px=to_decimal(ctx_payload.get("markPx")),
+            mid_px=to_decimal(ctx_payload.get("midPx")),
+            impact_bid=None
+            if ctx_payload.get("impactPxs") is None
+            else to_decimal(ctx_payload["impactPxs"][0]),
+            impact_ask=None
+            if ctx_payload.get("impactPxs") is None
+            else to_decimal(ctx_payload["impactPxs"][1]),
+            funding_rate=to_decimal(ctx_payload.get("funding")),
+        )
+        with ctx_lock:
+            asset_ctx[coin.upper()] = ctx
+
+    try:
+        meta, ctxs = info.meta_and_asset_ctxs()
+        for asset_info, ctx_payload in zip(meta.get("universe", []), ctxs):
+            coin = asset_info.get("name")
+            if coin and ctx_payload:
+                set_ctx(coin, ctx_payload)
+    except Exception as exc:
+        print(f"Warning: failed to prime asset contexts: {exc}", file=sys.stderr)
+
+    def on_ws_trades(msg):
+        for item in msg["data"]:
+            trade_queue.put(Trade.from_raw(item["coin"], item))
+
+    def on_ws_asset_ctx(msg):
+        data = msg.get("data", {})
+        coin = data.get("coin")
+        ctx_payload = data.get("ctx")
+        if coin and ctx_payload:
+            set_ctx(coin, ctx_payload)
+
+    
