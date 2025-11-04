@@ -165,3 +165,54 @@ class TradeCache:
                     except Exception:
                         continue
                     self._store[coin][trade.tid] = trade
+
+
+def load_cache(path: str, lookback_seconds: int) -> TradeCache:
+    cache = TradeCache(lookback_seconds)
+    if not path or not os.path.exists(path):
+        return cache
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        cache.load_json(payload)
+        cache.prune_all()
+        print(f"Loaded {len(cache.all_recent())} cached trades from {path}")
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Warning: could not load cache {path}: {exc}", file=sys.stderr)
+    return cache
+
+
+def save_cache(path: str, cache: TradeCache) -> None:
+    if not path:
+        return
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(cache.to_json(), fh)
+    os.replace(tmp_path, path)
+
+
+def format_notional(value: Decimal) -> str:
+    return f"${value:,.2f}"
+
+
+def summarize_trade(trade: Trade) -> str:
+    ts = time.strftime(
+        "%Y-%m-%d %H:%M:%S",
+        time.gmtime(trade.time_ms / 1000),
+    )
+    return (
+        f"[{ts} UTC] {trade.coin}: {trade.direction.upper()} "
+        f"{trade.size.normalize()} @ {trade.price.normalize()} "
+        f"({format_notional(trade.notional_usd)}) "
+        f"taker={trade.users[0]} maker={trade.users[1]}"
+    )
+
+
+def fetch_recent(info: Info, coin: str) -> List[Trade]:
+    try:
+        raw = info.post("/info", {"type": "recentTrades", "coin": coin})
+        return [Trade.from_raw(coin, item) for item in raw]
+    except Exception as exc:  # pragma: no cover - network failure fallback
+        print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
+        return []
+
