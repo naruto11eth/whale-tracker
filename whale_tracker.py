@@ -216,6 +216,7 @@ def fetch_recent(info: Info, coin: str) -> List[Trade]:
         print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
         return []
 
+
 @dataclass
 class AssetContext:
     coin: str
@@ -260,6 +261,7 @@ def compute_funding_effect(
     if trade.direction == "short":
         effect = -effect
     return effect
+
 
 def run_tracker(args: argparse.Namespace) -> None:
     lookback_seconds = int(args.lookback_hours * 3600)
@@ -442,7 +444,7 @@ def run_tracker(args: argparse.Namespace) -> None:
             if args.storage_file and time.time() - last_save >= args.save_interval:
                 save_cache(args.storage_file, cache)
                 last_save = time.time()
-        
+
         # ensure queue is drained before exit
         while not trade_queue.empty():
             try:
@@ -457,6 +459,7 @@ def run_tracker(args: argparse.Namespace) -> None:
             info.disconnect_websocket()
         except RuntimeError:
             pass
+
 
 def run_sentiment(args: argparse.Namespace) -> None:
     lookback_seconds = int(args.sentiment_lookback * 3600)
@@ -501,6 +504,7 @@ def run_sentiment(args: argparse.Namespace) -> None:
         ]
     ]
     print_table(headers, rows)
+
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
