@@ -216,3 +216,47 @@ def fetch_recent(info: Info, coin: str) -> List[Trade]:
         print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
         return []
 
+@dataclass
+class AssetContext:
+    coin: str
+    mark_px: Optional[Decimal]
+    mid_px: Optional[Decimal]
+    impact_bid: Optional[Decimal]
+    impact_ask: Optional[Decimal]
+    funding_rate: Optional[Decimal]
+
+
+def print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            col_widths[idx] = max(col_widths[idx], len(cell))
+
+    def fmt_row(row: Sequence[str]) -> str:
+        return " | ".join(cell.ljust(col_widths[idx]) for idx, cell in enumerate(row))
+
+    divider = "-+-".join("-" * w for w in col_widths)
+    print(fmt_row(headers))
+    print(divider)
+    for row in rows:
+        print(fmt_row(row))
+    print()
+
+
+def compute_pnl_vs_mark(trade: Trade, mark_px: Optional[Decimal]) -> Optional[Decimal]:
+    if mark_px is None:
+        return None
+    if trade.direction == "long":
+        return (mark_px - trade.price) * trade.size
+    return (trade.price - mark_px) * trade.size
+
+
+def compute_funding_effect(
+    trade: Trade, funding_rate: Optional[Decimal]
+) -> Optional[Decimal]:
+    if funding_rate is None:
+        return None
+    effect = trade.notional_usd * funding_rate
+    if trade.direction == "short":
+        effect = -effect
+    return effect
