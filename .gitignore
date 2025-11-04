@@ -1,0 +1,17 @@
+.venv/
+*.pyc
+__pycache__/
+trade_cache.json
+# reverse-engineering artifacts (HTML/JS dumps, docs copies, etc.)
+*.html
+*.md
+main.js
+main.js.map
+main.pretty.js
+api_index.md
+info_api.html
+info_endpoint.md
+explorer_endpoint.md
+historical_data.md
+ws_post_requests.md
+ws_subscriptions.md
