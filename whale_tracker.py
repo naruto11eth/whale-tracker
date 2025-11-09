@@ -22,6 +22,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -31,7 +32,7 @@ from hyperliquid.info import Info
 DEFAULT_THRESHOLD_USD = Decimal("10000000")  # $10M
 DEFAULT_LOOKBACK_HOURS = 12
 DEFAULT_SAVE_INTERVAL_SECONDS = 60
-DEFAULT_STORAGE_PATH = "trade_cache.json"
+DEFAULT_STORAGE_PATH: Optional[str] = None
 
 
 def to_decimal(value: Optional[str]) -> Optional[Decimal]:
@@ -263,9 +264,77 @@ def compute_funding_effect(
     return effect
 
 
+def read_coins_from_file(path: str) -> List[str]:
+    file_path = Path(path)
+    if not file_path.exists():
+        raise SystemExit(f"Coin list file not found: {path}")
+    tokens: List[str] = []
+    with open(file_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            tokens.extend(stripped.split())
+    return tokens
+
+
+def discover_all_coins() -> List[str]:
+    info = Info(skip_ws=True)
+    meta = info.meta()
+    coins: List[str] = []
+    for asset in meta.get("universe", []):
+        name = asset.get("name")
+        if not name:
+            continue
+        if asset.get("isDelisted"):
+            continue
+        if name not in coins:
+            coins.append(name)
+    return coins
+
+
+def resolve_coins(args: argparse.Namespace) -> List[str]:
+    resolved: List[str] = []
+    seen: Set[str] = set()
+
+    def push(items: Iterable[str]) -> None:
+        for coin in items:
+            normalized = coin.strip()
+            if not normalized:
+                continue
+            key = normalized.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(normalized)
+
+    cli_coins = args.coins or []
+    if len(cli_coins) == 1 and cli_coins[0].lower() == "all":
+        push(discover_all_coins())
+    else:
+        push(cli_coins)
+
+    if args.coins_file:
+        push(read_coins_from_file(args.coins_file))
+
+    if not resolved:
+        raise SystemExit("No coins resolved. Provide --coins, --coins all, or --coins-file.")
+
+    return resolved
+
+
+def resolve_storage_path(user_path: Optional[str]) -> str:
+    if user_path:
+        return user_path
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    return f"trade_cache_{timestamp}.json"
+
+
 def run_tracker(args: argparse.Namespace) -> None:
     lookback_seconds = int(args.lookback_hours * 3600)
     threshold = Decimal(str(args.threshold))
+    coins = resolve_coins(args)
+    print(f"Monitoring {len(coins)} coin(s)")
     cache = load_cache(args.storage_file, lookback_seconds)
 
     stop_event = threading.Event()
@@ -321,7 +390,7 @@ def run_tracker(args: argparse.Namespace) -> None:
             set_ctx(coin, ctx_payload)
 
     # Seed recent trades and websocket subscriptions.
-    for coin in args.coins:
+    for coin in coins:
         for trade in fetch_recent(info, coin):
             cache.add(trade)
         info.subscribe({"type": "trades", "coin": coin}, on_ws_trades)
@@ -441,7 +510,7 @@ def run_tracker(args: argparse.Namespace) -> None:
                         row += [trade.users[0], trade.users[1]]
                     print_table(headers, [row])
 
-            if args.storage_file and time.time() - last_save >= args.save_interval:
+            if time.time() - last_save >= args.save_interval:
                 save_cache(args.storage_file, cache)
                 last_save = time.time()
 
@@ -453,8 +522,7 @@ def run_tracker(args: argparse.Namespace) -> None:
             except Empty:
                 break
     finally:
-        if args.storage_file:
-            save_cache(args.storage_file, cache)
+        save_cache(args.storage_file, cache)
         try:
             info.disconnect_websocket()
         except RuntimeError:
@@ -517,6 +585,10 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="List of coins to monitor (default: %(default)s)",
     )
     parser.add_argument(
+        "--coins-file",
+        help="Optional text file with additional coin symbols (one per line or space-separated).",
+    )
+    parser.add_argument(
         "--threshold",
         type=Decimal,
         default=DEFAULT_THRESHOLD_USD,
@@ -531,7 +603,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--storage-file",
         default=DEFAULT_STORAGE_PATH,
-        help="Optional path to persist trades between runs (default: %(default)s)",
+        help="Optional cache file path (default: auto-generated trade_cache_TIMESTAMP.json)",
     )
     parser.add_argument(
         "--save-interval",
@@ -565,6 +637,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 if __name__ == "__main__":
     cli_args = parse_args()
+    cli_args.storage_file = resolve_storage_path(cli_args.storage_file)
+    print(f"Using cache file: {cli_args.storage_file}")
     try:
         if cli_args.sentiment:
             run_sentiment(cli_args)
