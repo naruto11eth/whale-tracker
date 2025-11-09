@@ -23,11 +23,12 @@ python3 whale_tracker.py [options]
 
 Key options:
 
-- `--coins BTC ETH …` Coins to monitor (default `BTC ETH`).
+- `--coins BTC ETH …` List of coins to monitor. Pass `all` to auto-discover every listed perp.
+- `--coins-file coins.txt` Optional text file (see `coins.txt`) with additional symbols, one per line or whitespace separated.
 - `--threshold 15000000` USD notional threshold (default `10000000`).
 - `--lookback-hours 12` Retention horizon for the cached trades.
 - `--show-users` Include taker/maker addresses in the output table.
-- `--storage-file trade_cache.json` On‑disk cache (default same name).
+- `--storage-file custom_cache.json` Explicit cache file path. When omitted a timestamped `trade_cache_YYYYmmdd_HHMMSS.json` is created automatically each run.
 - `--sentiment COIN` Print long/short flow mix for a coin and exit.
 - `--sentiment-lookback 6` Lookback (in hours) used for sentiment mode.
 - `--no-startup-summary` Skip the initial snapshot of cached trades.
@@ -38,7 +39,31 @@ Example:
 python3 whale_tracker.py --coins BTC ETH --threshold 20000000 --show-users
 ```
 
-Run the tracker continuously (e.g. via tmux/systemd) to accumulate trades beyond the REST endpoint’s last-10 limit. The cache rolls automatically and persists to `trade_cache.json` between runs.
+Run the tracker continuously (e.g. via tmux/systemd) to accumulate trades beyond the REST endpoint’s last-10 limit. Each run writes to its own cache file unless you pass `--storage-file` to reuse a prior dataset.
+
+### Monitoring All Coins
+
+You can launch the tracker for every listed perp by discovering the universe at runtime:
+
+```bash
+python3 whale_tracker.py --coins $(python3 - <<'PY'
+from hyperliquid.info import Info
+meta = Info(skip_ws=True).meta()
+coins = [asset["name"] for asset in meta["universe"] if not asset.get("isDelisted")]
+print(" ".join(coins))
+PY
+) --threshold 0
+```
+
+This will subscribe to every coin’s trade and asset-context feed, so expect a high data rate.
+
+### Coins File
+
+Use the provided `coins.txt` (or create your own) to store a reusable list of symbols:
+
+```bash
+python3 whale_tracker.py --coins-file coins.txt --threshold 15000000
+```
 
 ### Sentiment Mode
 
@@ -52,7 +77,7 @@ The script reports trade counts and USD notionals by direction within the lookba
 
 ## Backfilling Trades
 
-The public `/info` API only exposes the most recent few trades per coin. For historical backfills, download HyperLiquid’s trade dumps from `s3://hl-mainnet-node-data/node_trades` (AWS CLI, requester pays) and merge them into `trade_cache.json` before launching the tracker.
+The public `/info` API only exposes the most recent few trades per coin. For historical backfills, download HyperLiquid’s trade dumps from `s3://hl-mainnet-node-data/node_trades` (AWS CLI, requester pays) and merge them into your cache file before launching the tracker.
 
 ## Notes
 
