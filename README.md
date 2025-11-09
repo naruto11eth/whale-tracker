@@ -6,6 +6,7 @@ Command–line tool for monitoring large trades (default ≥ $10 M notional)
 
 - Python 3.9+
 - [`hyperliquid-python-sdk`](https://github.com/hyperliquid-dex/hyperliquid-python-sdk)
+- [`requests`](https://pypi.org/project/requests/)
 
 Example setup:
 
@@ -28,6 +29,7 @@ Key options:
 - `--threshold 15000000` USD notional threshold (default `10000000`).
 - `--lookback-hours 12` Retention horizon for the cached trades.
 - `--show-users` Include taker/maker addresses in the output table.
+- `--telegram-token / --telegram-chat-id` Send whale alerts to a Telegram bot/chat.
 - `--storage-file custom_cache.json` Explicit cache file path. When omitted a timestamped `trade_cache_YYYYmmdd_HHMMSS.json` is created automatically each run.
 - `--sentiment COIN` Print long/short flow mix for a coin and exit.
 - `--sentiment-lookback 6` Lookback (in hours) used for sentiment mode.
@@ -64,6 +66,28 @@ Use the provided `coins.txt` (or create your own) to store a reusable list of sy
 ```bash
 python3 whale_tracker.py --coins-file coins.txt --threshold 15000000
 ```
+
+### Telegram Alerts
+
+Provide your bot token and chat ID to receive push notifications for every whale trade:
+
+```bash
+python3 whale_tracker.py --coins BTC ETH \
+    --threshold 15000000 \
+    --telegram-token YOUR_BOT_TOKEN \
+    --telegram-chat-id YOUR_CHAT_ID
+```
+
+Create a bot via [@BotFather](https://core.telegram.org/bots#6-botfather). DM the bot once, then call `https://api.telegram.org/bot<token>/getUpdates` to discover your chat ID.
+
+You can also keep credentials in a `.env` file (automatically loaded) so you don’t pass them on the CLI:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:ABCDEF
+TELEGRAM_CHAT_ID=987654321
+```
+
+Use `--env-file custom.env` to load an alternative secrets file.
 
 ### Sentiment Mode
 
