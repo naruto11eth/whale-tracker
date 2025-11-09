@@ -1,6 +1,4 @@
-# Example list of coins for --coins-file
+# Example coin list for --coins-file
 BTC
 ETH
 SOL
-ZEC
-HYPE

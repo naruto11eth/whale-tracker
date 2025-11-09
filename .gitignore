@@ -2,6 +2,8 @@
 *.pyc
 __pycache__/
 trade_cache.json
+trade_cache_*.json
+.env
 # reverse-engineering artifacts (HTML/JS dumps, docs copies, etc.)
 *.html
 main.js
