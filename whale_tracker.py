@@ -26,6 +26,8 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+import requests
+
 from hyperliquid.info import Info
 
 
@@ -33,6 +35,32 @@ DEFAULT_THRESHOLD_USD = Decimal("10000000")  # $10M
 DEFAULT_LOOKBACK_HOURS = 12
 DEFAULT_SAVE_INTERVAL_SECONDS = 60
 DEFAULT_STORAGE_PATH: Optional[str] = None
+
+
+def load_env_file(path: str) -> None:
+    file_path = Path(path)
+    if not file_path.exists():
+        return
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if not key:
+                    continue
+                value = value.strip().strip('"').strip("'")
+                os.environ[key] = value
+    except OSError as exc:  # pragma: no cover - filesystem guard
+        print(f"Warning: could not read env file {path}: {exc}", file=sys.stderr)
+
+
+# Load default .env early so argparse defaults can read the values.
+load_env_file(".env")
 
 
 def to_decimal(value: Optional[str]) -> Optional[Decimal]:
@@ -264,6 +292,55 @@ def compute_funding_effect(
     return effect
 
 
+class TelegramNotifier:
+    def __init__(self, token: str, chat_id: str) -> None:
+        self.token = token
+        self.chat_id = chat_id
+        self.endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    def send(self, text: str) -> None:
+        try:
+            resp = requests.post(
+                self.endpoint,
+                json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            if not resp.ok:
+                print(
+                    f"Telegram notify failed: {resp.status_code} {resp.text}",
+                    file=sys.stderr,
+                )
+        except requests.RequestException as exc:  # pragma: no cover - network
+            print(f"Telegram notify error: {exc}", file=sys.stderr)
+
+
+def build_alert_text(
+    trade: Trade,
+    mark_px: Optional[Decimal],
+    mid_px: Optional[Decimal],
+    pnl_vs_mark: Optional[Decimal],
+    funding_rate: Optional[Decimal],
+    funding_effect: Optional[Decimal],
+) -> str:
+    parts = [
+        f"<b>{trade.coin}</b> {trade.direction.upper()}",
+        f"Size: {trade.size.normalize()} @ {trade.price.normalize()} ({format_notional(trade.notional_usd)})",
+    ]
+    if mark_px is not None:
+        parts.append(f"Mark: {mark_px.normalize()}")
+    if mid_px is not None:
+        parts.append(f"Mid: {mid_px.normalize()}")
+    if pnl_vs_mark is not None:
+        parts.append(f"PnL vs mark: {format_notional(pnl_vs_mark)}")
+    if funding_rate is not None:
+        rate_pct = funding_rate * Decimal(100)
+        parts.append(f"Funding: {rate_pct:.4f}%")
+    if funding_effect is not None:
+        parts.append(f"Funding impact: {format_notional(funding_effect)}")
+    parts.append(f"Trade: https://app.hyperliquid.xyz/trade/{trade.coin}")
+    return "\n".join(parts)
+
+
 def read_coins_from_file(path: str) -> List[str]:
     file_path = Path(path)
     if not file_path.exists():
@@ -336,6 +413,15 @@ def run_tracker(args: argparse.Namespace) -> None:
     coins = resolve_coins(args)
     print(f"Monitoring {len(coins)} coin(s)")
     cache = load_cache(args.storage_file, lookback_seconds)
+
+    notifier: Optional[TelegramNotifier] = None
+    if args.telegram_token and args.telegram_chat_id:
+        notifier = TelegramNotifier(args.telegram_token, args.telegram_chat_id)
+    elif args.telegram_token or args.telegram_chat_id:
+        print(
+            "Both --telegram-token and --telegram-chat-id are required for Telegram alerts.",
+            file=sys.stderr,
+        )
 
     stop_event = threading.Event()
     trade_queue: "Queue[Trade]" = Queue()
@@ -510,6 +596,18 @@ def run_tracker(args: argparse.Namespace) -> None:
                         row += [trade.users[0], trade.users[1]]
                     print_table(headers, [row])
 
+                    if notifier:
+                        notifier.send(
+                            build_alert_text(
+                                trade,
+                                mark_px,
+                                mid_px,
+                                pnl,
+                                ctx.funding_rate if ctx else None,
+                                funding_effect,
+                            )
+                        )
+
             if time.time() - last_save >= args.save_interval:
                 save_cache(args.storage_file, cache)
                 last_save = time.time()
@@ -589,6 +687,10 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Optional text file with additional coin symbols (one per line or space-separated).",
     )
     parser.add_argument(
+        "--env-file",
+        help="Optional .env file to load (defaults to .env if present).",
+    )
+    parser.add_argument(
         "--threshold",
         type=Decimal,
         default=DEFAULT_THRESHOLD_USD,
@@ -617,6 +719,16 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Display taker/maker addresses in alerts.",
     )
     parser.add_argument(
+        "--telegram-token",
+        default=os.getenv("TELEGRAM_BOT_TOKEN"),
+        help="Telegram bot token for alerts (defaults to TELEGRAM_BOT_TOKEN env).",
+    )
+    parser.add_argument(
+        "--telegram-chat-id",
+        default=os.getenv("TELEGRAM_CHAT_ID"),
+        help="Telegram chat ID (user or group) for alerts (defaults to TELEGRAM_CHAT_ID env).",
+    )
+    parser.add_argument(
         "--sentiment",
         help="Print sentiment for the specified coin and exit.",
     )
@@ -637,6 +749,12 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 if __name__ == "__main__":
     cli_args = parse_args()
+    if cli_args.env_file:
+        load_env_file(cli_args.env_file)
+        if not cli_args.telegram_token:
+            cli_args.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not cli_args.telegram_chat_id:
+            cli_args.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
     cli_args.storage_file = resolve_storage_path(cli_args.storage_file)
     print(f"Using cache file: {cli_args.storage_file}")
     try:
