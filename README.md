@@ -85,9 +85,12 @@ You can also keep credentials in a `.env` file (automatically loaded) so you don
 ```env
 TELEGRAM_BOT_TOKEN=123456:ABCDEF
 TELEGRAM_CHAT_ID=987654321
+TELEGRAM_THREAD_ID=42  # optional, for forum topics
 ```
 
 Use `--env-file custom.env` to load an alternative secrets file.
+
+If you want alerts in a specific forum topic inside a supergroup, capture the topic’s `message_thread_id` from `getUpdates` and pass `--telegram-thread-id 42` (or set `TELEGRAM_THREAD_ID` in `.env`).
 
 ### Sentiment Mode
 
