@@ -293,16 +293,24 @@ def compute_funding_effect(
 
 
 class TelegramNotifier:
-    def __init__(self, token: str, chat_id: str) -> None:
+    def __init__(self, token: str, chat_id: str, thread_id: Optional[int] = None) -> None:
         self.token = token
         self.chat_id = chat_id
+        self.thread_id = thread_id
         self.endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
 
     def send(self, text: str) -> None:
         try:
+            payload = {
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+            }
+            if self.thread_id is not None:
+                payload["message_thread_id"] = self.thread_id
             resp = requests.post(
                 self.endpoint,
-                json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
+                json=payload,
                 timeout=10,
             )
             if not resp.ok:
@@ -416,7 +424,11 @@ def run_tracker(args: argparse.Namespace) -> None:
 
     notifier: Optional[TelegramNotifier] = None
     if args.telegram_token and args.telegram_chat_id:
-        notifier = TelegramNotifier(args.telegram_token, args.telegram_chat_id)
+        notifier = TelegramNotifier(
+            args.telegram_token,
+            args.telegram_chat_id,
+            args.telegram_thread_id,
+        )
     elif args.telegram_token or args.telegram_chat_id:
         print(
             "Both --telegram-token and --telegram-chat-id are required for Telegram alerts.",
@@ -729,6 +741,11 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Telegram chat ID (user or group) for alerts (defaults to TELEGRAM_CHAT_ID env).",
     )
     parser.add_argument(
+        "--telegram-thread-id",
+        default=os.getenv("TELEGRAM_THREAD_ID"),
+        help="Optional Telegram topic/thread ID for forum groups (defaults to TELEGRAM_THREAD_ID env).",
+    )
+    parser.add_argument(
         "--sentiment",
         help="Print sentiment for the specified coin and exit.",
     )
@@ -755,6 +772,19 @@ if __name__ == "__main__":
             cli_args.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
         if not cli_args.telegram_chat_id:
             cli_args.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not cli_args.telegram_thread_id:
+            cli_args.telegram_thread_id = os.getenv("TELEGRAM_THREAD_ID")
+
+    thread_id_value: Optional[int] = None
+    if cli_args.telegram_thread_id:
+        try:
+            thread_id_value = int(str(cli_args.telegram_thread_id).strip())
+        except ValueError as exc:  # pragma: no cover - CLI guard
+            raise SystemExit(
+                f"Invalid telegram thread id '{cli_args.telegram_thread_id}': {exc}"
+            )
+    cli_args.telegram_thread_id = thread_id_value
+
     cli_args.storage_file = resolve_storage_path(cli_args.storage_file)
     print(f"Using cache file: {cli_args.storage_file}")
     try:
