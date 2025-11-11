@@ -26,6 +26,7 @@ Key options:
 
 - `--coins BTC ETH …` List of coins to monitor. Pass `all` to auto-discover every listed perp.
 - `--coins-file coins.txt` Optional text file (see `coins.txt`) with additional symbols, one per line or whitespace separated.
+- `--env-file secrets.env` Load a custom `.env` file (defaults to `.env` when present).
 - `--threshold 15000000` USD notional threshold (default `10000000`).
 - `--lookback-hours 12` Retention horizon for the cached trades.
 - `--show-users` Include taker/maker addresses in the output table.
@@ -91,6 +92,19 @@ TELEGRAM_THREAD_ID=42  # optional, for forum topics
 Use `--env-file custom.env` to load an alternative secrets file.
 
 If you want alerts in a specific forum topic inside a supergroup, capture the topic’s `message_thread_id` from `getUpdates` and pass `--telegram-thread-id 42` (or set `TELEGRAM_THREAD_ID` in `.env`).
+
+### Telegram Commands
+
+Once the bot is in a chat you can control it without restarting the tracker:
+
+- `/turn_on_auto_watcher` / `/turn_off_auto_watcher` – toggle real-time alert blasting while continuing to record trades.
+- `/last_10_trades`, `/last_20_trades`, `/last_50_trades` – dump the most recent cached whale alerts.
+- `/coin_watcher BTC` – subscribe to a new coin on the fly.
+- `/market_sentiment ETH` – show the cached sentiment summary for any coin.
+
+When auto alerts are off the tracker still records trades (up to 500) so you can pull them on demand with the `/last_*` commands.
+
+All commands respect the optional `TELEGRAM_THREAD_ID`; send them inside the same topic/channel where the bot posts alerts.
 
 ### Sentiment Mode
 
