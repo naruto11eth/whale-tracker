@@ -19,12 +19,12 @@ import signal
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import requests
 
@@ -329,9 +329,12 @@ def build_alert_text(
     pnl_vs_mark: Optional[Decimal],
     funding_rate: Optional[Decimal],
     funding_effect: Optional[Decimal],
+    include_users: bool = False,
 ) -> str:
+    direction = trade.direction.upper()
     parts = [
-        f"<b>{trade.coin}</b> {trade.direction.upper()}",
+        f"<b>{trade.coin}</b> {direction}",
+        "",
         f"Size: {trade.size.normalize()} @ {trade.price.normalize()} ({format_notional(trade.notional_usd)})",
     ]
     if mark_px is not None:
@@ -345,8 +348,190 @@ def build_alert_text(
         parts.append(f"Funding: {rate_pct:.4f}%")
     if funding_effect is not None:
         parts.append(f"Funding impact: {format_notional(funding_effect)}")
+    if include_users:
+        parts.append(f"Taker: {trade.users[0]}  |  Maker: {trade.users[1]}")
+    parts.append("")
     parts.append(f"Trade: https://app.hyperliquid.xyz/trade/{trade.coin}")
     return "\n".join(parts)
+
+
+class TrackerState:
+    def __init__(self, history_limit: int = 500) -> None:
+        self._history: Deque[str] = deque(maxlen=history_limit)
+        self._auto_watch = True
+        self._lock = threading.Lock()
+
+    def set_auto_watch(self, enabled: bool) -> None:
+        with self._lock:
+            self._auto_watch = enabled
+
+    def is_auto_watch(self) -> bool:
+        with self._lock:
+            return self._auto_watch
+
+    def record_trade(self, message: str) -> None:
+        with self._lock:
+            self._history.appendleft(message)
+
+    def recent_trades(self, count: int) -> List[str]:
+        with self._lock:
+            return list(self._history)[:count]
+
+
+class TelegramCommandHandler:
+    def __init__(
+        self,
+        token: str,
+        chat_id: str,
+        thread_id: Optional[int],
+        state: TrackerState,
+        notifier: TelegramNotifier,
+        subscribe_fn,
+        sentiment_fn,
+        cache: TradeCache,
+        lookback_hours: float,
+        stop_event: threading.Event,
+    ) -> None:
+        self.token = token
+        self.chat_id = str(chat_id)
+        self.thread_id = thread_id
+        self.state = state
+        self.notifier = notifier
+        self.subscribe_fn = subscribe_fn
+        self.sentiment_fn = sentiment_fn
+        self.cache = cache
+        self.lookback_hours = lookback_hours
+        self.stop_event = stop_event
+        self.endpoint = f"https://api.telegram.org/bot{token}/getUpdates"
+        self._thread: Optional[threading.Thread] = None
+        self._offset: Optional[int] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def _poll_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                params: Dict[str, object] = {"timeout": 30}
+                if self._offset is not None:
+                    params["offset"] = self._offset
+                resp = requests.get(self.endpoint, params=params, timeout=35)
+                if not resp.ok:
+                    time.sleep(5)
+                    continue
+                data = resp.json()
+                results = data.get("result", [])
+                for item in results:
+                    self._offset = item.get("update_id", 0) + 1
+                    message = item.get("message") or item.get("edited_message")
+                    if not message:
+                        continue
+                    chat = message.get("chat", {})
+                    if str(chat.get("id")) != self.chat_id:
+                        continue
+                    thread_id = message.get("message_thread_id")
+                    if self.thread_id is not None and thread_id != self.thread_id:
+                        continue
+                    text = message.get("text")
+                    if not text or not text.startswith("/"):
+                        continue
+                    self._handle_command(text.strip())
+            except requests.RequestException:
+                time.sleep(5)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"Telegram command handler error: {exc}", file=sys.stderr)
+                time.sleep(5)
+
+    def _handle_command(self, text: str) -> None:
+        parts = text.split()
+        if not parts:
+            return
+        command = parts[0].split("@")[0].lower()
+        args = parts[1:]
+
+        if command in {"/turn_on_auto_watcher", "/turnonauto", "/auto_on"}:
+            self.state.set_auto_watch(True)
+            self.notifier.send("Auto watcher enabled.")
+        elif command in {"/turn_off_auto_watcher", "/turnoffauto", "/auto_off"}:
+            self.state.set_auto_watch(False)
+            self.notifier.send("Auto watcher disabled. Trades will still be recorded.")
+        elif command in {"/last_10_trades", "/last10"}:
+            self._send_recent_trades(10)
+        elif command in {"/last_20_trades", "/last20"}:
+            self._send_recent_trades(20)
+        elif command in {"/last_50_trades", "/last50"}:
+            self._send_recent_trades(50)
+        elif command == "/market_sentiment":
+            if not args:
+                self.notifier.send("Usage: /market_sentiment COIN")
+                return
+            coin = args[0].upper()
+            summary = self.sentiment_fn(coin, self.cache)
+            self.notifier.send(summary)
+        elif command == "/coin_watcher":
+            if not args:
+                self.notifier.send("Usage: /coin_watcher COIN")
+                return
+            coin = args[0].upper()
+            added, message = self.subscribe_fn(coin)
+            self.notifier.send(message if message else f"Watching {coin}.")
+        else:
+            if command.startswith("/last_") and command.endswith("_trades"):
+                try:
+                    count = int(command.split("_")[1])
+                    self._send_recent_trades(count)
+                    return
+                except ValueError:
+                    pass
+            self.notifier.send("Unknown command.")
+
+    def _send_recent_trades(self, count: int) -> None:
+        entries = self.state.recent_trades(count)
+        if not entries:
+            self.notifier.send("No trades recorded yet.")
+            return
+        chunks = []
+        for msg in entries:
+            chunks.append(msg)
+        self.notifier.send("\n\n".join(chunks))
+
+
+def compute_sentiment_summary(coin: str, cache: TradeCache, lookback_hours: float) -> str:
+    normalized = coin.upper()
+    trades = cache.recent(normalized)
+    if len(trades) < 20:
+        try:
+            info = Info(skip_ws=True)
+            for trade in fetch_recent(info, normalized):
+                cache.add(trade)
+            trades = cache.recent(normalized)
+        except Exception as exc:  # pragma: no cover - network fallback
+            print(f"Sentiment fetch failed for {normalized}: {exc}", file=sys.stderr)
+
+    if not trades:
+        return f"No trades available for {normalized} in the current lookback window."
+
+    total = len(trades)
+    longs = [t for t in trades if t.direction == "long"]
+    shorts = [t for t in trades if t.direction == "short"]
+
+    long_notional = sum((t.notional_usd for t in longs), Decimal("0"))
+    short_notional = sum((t.notional_usd for t in shorts), Decimal("0"))
+
+    long_pct = (len(longs) / total * 100) if total else 0
+    short_pct = (len(shorts) / total * 100) if total else 0
+
+    lines = [
+        f"Sentiment for {normalized}",
+        f"Window: last {lookback_hours:g}h of cached data",
+        f"Total trades: {total}",
+        f"Longs: {len(longs)} ({long_pct:.2f}%) | Volume: {format_notional(long_notional)}",
+        f"Shorts: {len(shorts)} ({short_pct:.2f}%) | Volume: {format_notional(short_notional)}",
+    ]
+    return "\n".join(lines)
 
 
 def read_coins_from_file(path: str) -> List[str]:
@@ -422,6 +607,8 @@ def run_tracker(args: argparse.Namespace) -> None:
     print(f"Monitoring {len(coins)} coin(s)")
     cache = load_cache(args.storage_file, lookback_seconds)
 
+    tracker_state = TrackerState()
+
     notifier: Optional[TelegramNotifier] = None
     if args.telegram_token and args.telegram_chat_id:
         notifier = TelegramNotifier(
@@ -446,8 +633,7 @@ def run_tracker(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    info = Info()  # websocket manager spins up in background
-
+    info = Info()
     ctx_lock = threading.Lock()
     asset_ctx: Dict[str, AssetContext] = {}
 
@@ -487,15 +673,30 @@ def run_tracker(args: argparse.Namespace) -> None:
         if coin and ctx_payload:
             set_ctx(coin, ctx_payload)
 
-    # Seed recent trades and websocket subscriptions.
+    subscribed_coins: Set[str] = set()
+    subscription_lock = threading.Lock()
+
+    def subscribe_coin(coin: str) -> Tuple[bool, Optional[str]]:
+        normalized = coin.upper()
+        with subscription_lock:
+            if normalized in subscribed_coins:
+                return False, f"Already watching {normalized}."
+            try:
+                for trade in fetch_recent(info, normalized):
+                    cache.add(trade)
+                info.subscribe({"type": "trades", "coin": normalized}, on_ws_trades)
+                info.subscribe({"type": "activeAssetCtx", "coin": normalized}, on_ws_asset_ctx)
+                subscribed_coins.add(normalized)
+                return True, f"Started watching {normalized}."
+            except Exception as exc:  # pragma: no cover - defensive
+                return False, f"Failed to watch {normalized}: {exc}"
+
     for coin in coins:
-        for trade in fetch_recent(info, coin):
-            cache.add(trade)
-        info.subscribe({"type": "trades", "coin": coin}, on_ws_trades)
-        info.subscribe({"type": "activeAssetCtx", "coin": coin}, on_ws_asset_ctx)
+        added, message = subscribe_coin(coin)
+        if message:
+            print(message)
 
     cache.prune_all()
-
     now_ms = int(time.time() * 1000)
     for trade in cache.all_recent(now_ms):
         if trade.notional_usd >= threshold:
@@ -518,9 +719,7 @@ def run_tracker(args: argparse.Namespace) -> None:
             ]
             rows = [
                 [
-                    time.strftime(
-                        "%Y-%m-%d %H:%M:%S", time.gmtime(trade.time_ms / 1000)
-                    ),
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(trade.time_ms / 1000)),
                     trade.coin,
                     trade.direction.upper(),
                     str(trade.size.normalize()),
@@ -533,13 +732,31 @@ def run_tracker(args: argparse.Namespace) -> None:
         else:
             print("No large trades cached within lookback window.")
 
+    def sentiment_callback(symbol: str, cache_ref: TradeCache = cache) -> str:
+        return compute_sentiment_summary(symbol, cache_ref, args.sentiment_lookback)
+
+    if notifier and args.telegram_token and args.telegram_chat_id:
+        cmd_handler = TelegramCommandHandler(
+            args.telegram_token,
+            args.telegram_chat_id,
+            args.telegram_thread_id,
+            tracker_state,
+            notifier,
+            subscribe_coin,
+            sentiment_callback,
+            cache,
+            args.sentiment_lookback,
+            stop_event,
+        )
+        cmd_handler.start()
+
     last_save = time.time()
     try:
         while not stop_event.is_set():
             try:
                 trade = trade_queue.get(timeout=0.5)
             except Empty:
-                if args.storage_file and time.time() - last_save >= args.save_interval:
+                if time.time() - last_save >= args.save_interval:
                     save_cache(args.storage_file, cache)
                     last_save = time.time()
                 continue
@@ -585,9 +802,7 @@ def run_tracker(args: argparse.Namespace) -> None:
                         str(trade.size.normalize()),
                         str(trade.price.normalize()),
                         format_notional(trade.notional_usd),
-                        str(mark_px.normalize())
-                        if mark_px is not None
-                        else "N/A",
+                        str(mark_px.normalize()) if mark_px is not None else "N/A",
                         str(mid_px.normalize()) if mid_px is not None else "N/A",
                         str(ctx.impact_bid.normalize())
                         if ctx and ctx.impact_bid is not None
@@ -608,21 +823,19 @@ def run_tracker(args: argparse.Namespace) -> None:
                         row += [trade.users[0], trade.users[1]]
                     print_table(headers, [row])
 
-                    if notifier:
-                        notifier.send(
-                            build_alert_text(
-                                trade,
-                                mark_px,
-                                mid_px,
-                                pnl,
-                                ctx.funding_rate if ctx else None,
-                                funding_effect,
-                            )
-                        )
+                    alert_text = build_alert_text(
+                        trade,
+                        mark_px,
+                        mid_px,
+                        pnl,
+                        ctx.funding_rate if ctx else None,
+                        funding_effect,
+                        include_users=args.show_users,
+                    )
+                    tracker_state.record_trade(alert_text)
 
-            if time.time() - last_save >= args.save_interval:
-                save_cache(args.storage_file, cache)
-                last_save = time.time()
+                    if notifier and tracker_state.is_auto_watch():
+                        notifier.send(alert_text)
 
         # ensure queue is drained before exit
         while not trade_queue.empty():
@@ -632,56 +845,20 @@ def run_tracker(args: argparse.Namespace) -> None:
             except Empty:
                 break
     finally:
+        stop_event.set()
         save_cache(args.storage_file, cache)
         try:
             info.disconnect_websocket()
         except RuntimeError:
             pass
 
-
 def run_sentiment(args: argparse.Namespace) -> None:
-    lookback_seconds = int(args.sentiment_lookback * 3600)
-    cache = load_cache(args.storage_file, lookback_seconds)
-    coin = args.sentiment.upper()
-    trades = cache.recent(coin)
-
-    if len(trades) < 20:
-        info = Info(skip_ws=True)
-        extra_trades = fetch_recent(info, coin)
-        for trade in extra_trades:
-            cache.add(trade)
-        trades = cache.recent(coin)
-
-    if not trades:
-        print(f"No trades available for {coin} within lookback window.")
+    if not args.sentiment:
+        print("Please provide --sentiment COIN")
         return
-
-    longs = [t for t in trades if t.direction == "long"]
-    shorts = [t for t in trades if t.direction == "short"]
-    total = len(trades)
-    long_notional = sum((t.notional_usd for t in longs), Decimal("0"))
-    short_notional = sum((t.notional_usd for t in shorts), Decimal("0"))
-    headers = [
-        "Coin",
-        "Total Trades",
-        "Long %",
-        "Short %",
-        "Long Notional",
-        "Short Notional",
-    ]
-    long_pct = f"{(len(longs) / total) * 100:.2f}%"
-    short_pct = f"{(len(shorts) / total) * 100:.2f}%"
-    rows = [
-        [
-            coin,
-            str(total),
-            long_pct,
-            short_pct,
-            format_notional(long_notional),
-            format_notional(short_notional),
-        ]
-    ]
-    print_table(headers, rows)
+    cache = load_cache(args.storage_file, int(args.sentiment_lookback * 3600))
+    summary = compute_sentiment_summary(args.sentiment, cache, args.sentiment_lookback)
+    print(summary)
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
