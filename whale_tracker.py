@@ -36,10 +36,29 @@ DEFAULT_THRESHOLD_USD = Decimal("10000000")  # $10M
 DEFAULT_LOOKBACK_HOURS = 12
 DEFAULT_SAVE_INTERVAL_SECONDS = 60
 DEFAULT_STORAGE_PATH: Optional[str] = None
-VALID_PNL_PERIODS = {"day", "week", "month"}
+VALID_PNL_PERIODS = {"day", "week", "month", "all"}
+
+_PERIOD_ALIAS_GROUPS = {
+    "day": {"day", "1day", "1d", "daily"},
+    "week": {"week", "1week", "1w", "weekly"},
+    "month": {"month", "1month", "1m", "monthly"},
+    "all": {"all", "alltime", "all_time", "lifetime", "overall", "total"},
+}
 
 FETCH_SKIP_FAILURE_THRESHOLD = 3
 FETCH_SKIP_DURATION_SECONDS = 300
+
+
+def _canonical_period_key(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+_PERIOD_ALIAS_LOOKUP = {
+    _canonical_period_key(key): {
+        _canonical_period_key(alias) for alias in aliases
+    }
+    for key, aliases in _PERIOD_ALIAS_GROUPS.items()
+}
 
 # Track consecutive server failures per coin so we can temporarily pause noisy listings.
 _fetch_failure_lock = threading.Lock()
@@ -610,7 +629,7 @@ class TelegramCommandHandler:
             self.notifier.send(message if message else f"Watching {coin}.")
         elif command == "/pnl_of_address":
             if not args:
-                self.notifier.send("Usage: /pnl_of_address ADDRESS [day|week|month]")
+                self.notifier.send("Usage: /pnl_of_address ADDRESS [day|week|month|all]")
                 return
             address = args[0]
             period = args[1].lower() if len(args) > 1 else "day"
@@ -626,6 +645,7 @@ class TelegramCommandHandler:
                 except ValueError:
                     pass
             self.notifier.send("Unknown command.")
+
     def _send_recent_trades(self, count: int) -> None:
         entries = self.state.recent_trades(count)
         if not entries:
@@ -640,7 +660,7 @@ class TelegramCommandHandler:
         if not args:
             current = self.state.get_pnl_period() or "disabled"
             self.notifier.send(
-                "Usage: /pnl_period day|week|month|off\n"
+                "Usage: /pnl_period day|week|month|all|off\n"
                 f"Current: {current}"
             )
             return
@@ -723,14 +743,24 @@ def fetch_portfolio_pnl(address: str, period: str):
     segments: Dict[str, Any] = {}
     for entry in entries:
         if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-            key = str(entry[0]).lower()
-            segments[key] = entry[1]
+            key = _canonical_period_key(str(entry[0]))
+            if key:
+                segments[key] = entry[1]
         elif isinstance(entry, dict):
             key = entry.get("period") or entry.get("name")
             if key:
-                segments[str(key).lower()] = entry
+                canonical = _canonical_period_key(str(key))
+                if canonical:
+                    segments[canonical] = entry
 
-    data = segments.get(period)
+    canonical_period = _canonical_period_key(period)
+    search_keys = {canonical_period}
+    search_keys.update(_PERIOD_ALIAS_LOOKUP.get(canonical_period, set()))
+    data = None
+    for candidate in search_keys:
+        data = segments.get(candidate)
+        if data:
+            break
     if not data:
         return None, f"No portfolio data for period '{period}'."
 
@@ -1168,7 +1198,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--pnl-period",
-        choices=["day", "week", "month"],
+        choices=sorted(VALID_PNL_PERIODS),
         help="When set, include the taker's PnL for the given period in alerts.",
     )
     parser.add_argument(
