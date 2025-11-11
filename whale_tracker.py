@@ -29,13 +29,22 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tu
 import requests
 
 from hyperliquid.info import Info
-from hyperliquid.utils.error import ClientError
+from hyperliquid.utils.error import ClientError, ServerError
 
 
 DEFAULT_THRESHOLD_USD = Decimal("10000000")  # $10M
 DEFAULT_LOOKBACK_HOURS = 12
 DEFAULT_SAVE_INTERVAL_SECONDS = 60
 DEFAULT_STORAGE_PATH: Optional[str] = None
+VALID_PNL_PERIODS = {"day", "week", "month"}
+
+FETCH_SKIP_FAILURE_THRESHOLD = 3
+FETCH_SKIP_DURATION_SECONDS = 300
+
+# Track consecutive server failures per coin so we can temporarily pause noisy listings.
+_fetch_failure_lock = threading.Lock()
+_fetch_failure_counts: Dict[str, int] = defaultdict(int)
+_fetch_skip_until: Dict[str, float] = {}
 
 
 def load_env_file(path: str) -> None:
@@ -238,6 +247,42 @@ def summarize_trade(trade: Trade) -> str:
     )
 
 
+
+
+def _remaining_skip_seconds(coin: str) -> float:
+    normalized = coin.upper()
+    with _fetch_failure_lock:
+        until = _fetch_skip_until.get(normalized)
+        if until is None:
+            return 0.0
+        now = time.time()
+        if now >= until:
+            _fetch_skip_until.pop(normalized, None)
+            return 0.0
+        return until - now
+
+
+def _record_fetch_failure(coin: str, reason: str) -> None:
+    normalized = coin.upper()
+    with _fetch_failure_lock:
+        failures = _fetch_failure_counts[normalized] + 1
+        _fetch_failure_counts[normalized] = failures
+        if failures >= FETCH_SKIP_FAILURE_THRESHOLD:
+            _fetch_skip_until[normalized] = time.time() + FETCH_SKIP_DURATION_SECONDS
+            _fetch_failure_counts[normalized] = 0
+            print(
+                f"Suspending {normalized} fetches for {FETCH_SKIP_DURATION_SECONDS}s "
+                f"after repeated API errors ({reason})."
+            )
+
+
+def _record_fetch_success(coin: str) -> None:
+    normalized = coin.upper()
+    with _fetch_failure_lock:
+        _fetch_failure_counts.pop(normalized, None)
+        _fetch_skip_until.pop(normalized, None)
+
+
 def fetch_recent(
     info: Info,
     coin: str,
@@ -245,11 +290,20 @@ def fetch_recent(
     max_retries: int = 5,
     backoff_seconds: float = 0.5,
 ) -> List[Trade]:
+    remaining = _remaining_skip_seconds(coin)
+    if remaining > 0:
+        print(
+            f"Skipping {coin.upper()} fetch; cooling down for {int(remaining)}s due to repeated API errors."
+        )
+        return []
+
     delay = backoff_seconds
     for attempt in range(1, max_retries + 1):
         try:
             raw = info.post("/info", {"type": "recentTrades", "coin": coin})
-            return [Trade.from_raw(coin, item) for item in raw]
+            trades = [Trade.from_raw(coin, item) for item in raw]
+            _record_fetch_success(coin)
+            return trades
         except ClientError as exc:  # pragma: no cover - network failure fallback
             if exc.status_code == 429 and attempt < max_retries:
                 sleep_for = delay
@@ -262,6 +316,23 @@ def fetch_recent(
                 continue
             print(
                 f"Failed to pull recent trades for {coin}: HTTP {exc.status_code} {exc.error_message}",
+                file=sys.stderr,
+            )
+            break
+        except ServerError as exc:  # pragma: no cover - server failure fallback
+            if exc.status_code == 500:
+                _record_fetch_failure(coin, f"HTTP {exc.status_code}")
+                if attempt < max_retries:
+                    sleep_for = delay
+                    print(
+                        f"Server error while fetching {coin} trades (attempt {attempt}/{max_retries}). "
+                        f"Sleeping {sleep_for:.2f}s."
+                    )
+                    time.sleep(sleep_for)
+                    delay = min(delay * 2, 10)
+                    continue
+            print(
+                f"Failed to pull recent trades for {coin}: HTTP {exc.status_code} {exc.message}",
                 file=sys.stderr,
             )
             break
@@ -278,6 +349,9 @@ def fetch_recent(
             print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
             break
     return []
+
+
+
 
 
 @dataclass
@@ -397,6 +471,7 @@ class TrackerState:
     def __init__(self, history_limit: int = 500) -> None:
         self._history: Deque[str] = deque(maxlen=history_limit)
         self._auto_watch = True
+        self._pnl_period: Optional[str] = None
         self._lock = threading.Lock()
 
     def set_auto_watch(self, enabled: bool) -> None:
@@ -414,6 +489,19 @@ class TrackerState:
     def recent_trades(self, count: int) -> List[str]:
         with self._lock:
             return list(self._history)[:count]
+
+    def set_pnl_period(self, period: Optional[str]) -> None:
+        normalized = period.lower() if period else None
+        if normalized is not None and normalized not in VALID_PNL_PERIODS:
+            raise ValueError(
+                f"PnL period must be one of: {', '.join(sorted(VALID_PNL_PERIODS))}"
+            )
+        with self._lock:
+            self._pnl_period = normalized
+
+    def get_pnl_period(self) -> Optional[str]:
+        with self._lock:
+            return self._pnl_period
 
 
 class TelegramCommandHandler:
@@ -527,6 +615,8 @@ class TelegramCommandHandler:
             address = args[0]
             period = args[1].lower() if len(args) > 1 else "day"
             self.notifier.send(self.pnl_fn(address, period))
+        elif command in {"/pnl_period", "/set_pnl_period", "/pnlperiod"}:
+            self._handle_pnl_period_command(args)
         else:
             if command.startswith("/last_") and command.endswith("_trades"):
                 try:
@@ -536,7 +626,6 @@ class TelegramCommandHandler:
                 except ValueError:
                     pass
             self.notifier.send("Unknown command.")
-
     def _send_recent_trades(self, count: int) -> None:
         entries = self.state.recent_trades(count)
         if not entries:
@@ -547,6 +636,24 @@ class TelegramCommandHandler:
             chunks.append(msg)
         self.notifier.send("\n\n".join(chunks))
 
+    def _handle_pnl_period_command(self, args: Sequence[str]) -> None:
+        if not args:
+            current = self.state.get_pnl_period() or "disabled"
+            self.notifier.send(
+                "Usage: /pnl_period day|week|month|off\n"
+                f"Current: {current}"
+            )
+            return
+        choice = args[0].lower()
+        if choice in VALID_PNL_PERIODS:
+            self.state.set_pnl_period(choice)
+            self.notifier.send(f"PnL period set to {choice}.")
+        elif choice in {"off", "none", "disable", "disabled"}:
+            self.state.set_pnl_period(None)
+            self.notifier.send("PnL overlay disabled.")
+        else:
+            allowed = ", ".join(sorted(VALID_PNL_PERIODS))
+            self.notifier.send(f"Invalid period. Choose one of: {allowed}, or 'off'.")
 
 def compute_sentiment_summary(coin: str, cache: TradeCache, lookback_hours: float) -> str:
     normalized = coin.upper()
@@ -603,9 +710,8 @@ def _extract_portfolio_entries(payload: Any) -> List[Any]:
 
 def fetch_portfolio_pnl(address: str, period: str):
     period = period.lower()
-    valid_periods = {"day", "week", "month"}
-    if period not in valid_periods:
-        return None, f"Period must be one of: {', '.join(sorted(valid_periods))}"
+    if period not in VALID_PNL_PERIODS:
+        return None, f"Period must be one of: {', '.join(sorted(VALID_PNL_PERIODS))}"
 
     try:
         info = Info(skip_ws=True)
@@ -731,6 +837,7 @@ def run_tracker(args: argparse.Namespace) -> None:
     cache = load_cache(args.storage_file, lookback_seconds)
 
     tracker_state = TrackerState()
+    tracker_state.set_pnl_period(args.pnl_period)
 
     notifier: Optional[TelegramNotifier] = None
     if args.telegram_token and args.telegram_chat_id:
@@ -906,15 +1013,16 @@ def run_tracker(args: argparse.Namespace) -> None:
                         trade, ctx.funding_rate if ctx else None
                     )
                     period_pnl_value: Optional[Decimal] = None
-                    if args.pnl_period:
-                        cache_key = (trade.users[0], args.pnl_period)
+                    period_setting = tracker_state.get_pnl_period()
+                    if period_setting:
+                        cache_key = (trade.users[0], period_setting)
                         cached = pnl_cache.get(cache_key)
                         now = time.time()
                         if cached and now - cached[1] < pnl_cache_ttl:
                             period_pnl_value = cached[0]
                         else:
                             data, error = fetch_portfolio_pnl(
-                                trade.users[0], args.pnl_period
+                                trade.users[0], period_setting
                             )
                             if data:
                                 period_pnl_value = data["pnl"]
@@ -964,8 +1072,8 @@ def run_tracker(args: argparse.Namespace) -> None:
                     if not args.hide_users:
                         headers += ["Taker", "Maker"]
                         row += [trade.users[0], trade.users[1]]
-                    if args.pnl_period:
-                        headers += [f"{args.pnl_period.capitalize()} PnL"]
+                    if period_setting:
+                        headers += [f"{period_setting.capitalize()} PnL"]
                         if period_pnl_value is not None:
                             row.append(format_notional(period_pnl_value))
                         else:
@@ -981,7 +1089,7 @@ def run_tracker(args: argparse.Namespace) -> None:
                         funding_effect,
                         include_users=not args.hide_users,
                         period_pnl=period_pnl_value,
-                        pnl_period=args.pnl_period,
+                        pnl_period=period_setting,
                     )
                     tracker_state.record_trade(alert_text)
 
