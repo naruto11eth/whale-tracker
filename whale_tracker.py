@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import requests
 
@@ -329,7 +329,9 @@ def build_alert_text(
     pnl_vs_mark: Optional[Decimal],
     funding_rate: Optional[Decimal],
     funding_effect: Optional[Decimal],
-    include_users: bool = False,
+    include_users: bool = True,
+    period_pnl: Optional[Decimal] = None,
+    pnl_period: Optional[str] = None,
 ) -> str:
     direction = trade.direction.upper()
     parts = [
@@ -349,7 +351,9 @@ def build_alert_text(
     if funding_effect is not None:
         parts.append(f"Funding impact: {format_notional(funding_effect)}")
     if include_users:
-        parts.append(f"Taker: {trade.users[0]}  |  Maker: {trade.users[1]}")
+        parts.append(f"Taker: {trade.users[0]}\nMaker: {trade.users[1]}")
+    if period_pnl is not None and pnl_period:
+        parts.append(f"{pnl_period.capitalize()} PnL: {format_notional(period_pnl)}")
     parts.append("")
     parts.append(f"Trade: https://app.hyperliquid.xyz/trade/{trade.coin}")
     return "\n".join(parts)
@@ -388,6 +392,7 @@ class TelegramCommandHandler:
         notifier: TelegramNotifier,
         subscribe_fn,
         sentiment_fn,
+        pnl_fn,
         cache: TradeCache,
         lookback_hours: float,
         stop_event: threading.Event,
@@ -399,6 +404,7 @@ class TelegramCommandHandler:
         self.notifier = notifier
         self.subscribe_fn = subscribe_fn
         self.sentiment_fn = sentiment_fn
+        self.pnl_fn = pnl_fn
         self.cache = cache
         self.lookback_hours = lookback_hours
         self.stop_event = stop_event
@@ -425,9 +431,11 @@ class TelegramCommandHandler:
                 data = resp.json()
                 results = data.get("result", [])
                 for item in results:
+                    if not isinstance(item, dict):
+                        continue
                     self._offset = item.get("update_id", 0) + 1
                     message = item.get("message") or item.get("edited_message")
-                    if not message:
+                    if not isinstance(message, dict):
                         continue
                     chat = message.get("chat", {})
                     if str(chat.get("id")) != self.chat_id:
@@ -478,6 +486,13 @@ class TelegramCommandHandler:
             coin = args[0].upper()
             added, message = self.subscribe_fn(coin)
             self.notifier.send(message if message else f"Watching {coin}.")
+        elif command == "/pnl_of_address":
+            if not args:
+                self.notifier.send("Usage: /pnl_of_address ADDRESS [day|week|month]")
+                return
+            address = args[0]
+            period = args[1].lower() if len(args) > 1 else "day"
+            self.notifier.send(self.pnl_fn(address, period))
         else:
             if command.startswith("/last_") and command.endswith("_trades"):
                 try:
@@ -532,6 +547,80 @@ def compute_sentiment_summary(coin: str, cache: TradeCache, lookback_hours: floa
         f"Shorts: {len(shorts)} ({short_pct:.2f}%) | Volume: {format_notional(short_notional)}",
     ]
     return "\n".join(lines)
+
+
+def _extract_portfolio_entries(payload: Any) -> List[Any]:
+    if isinstance(payload, dict):
+        entries = payload.get("portfolio")
+        if entries is None:
+            entries = payload.get("result")
+        if entries is None:
+            entries = payload.get("data")
+        if entries is None:
+            entries = list(payload.items())
+    else:
+        entries = payload
+    if isinstance(entries, dict):
+        return list(entries.items())
+    if isinstance(entries, list):
+        return entries
+    return []
+
+
+def fetch_portfolio_pnl(address: str, period: str):
+    period = period.lower()
+    valid_periods = {"day", "week", "month"}
+    if period not in valid_periods:
+        return None, f"Period must be one of: {', '.join(sorted(valid_periods))}"
+
+    try:
+        info = Info(skip_ws=True)
+        portfolio = info.portfolio(address)
+    except Exception as exc:  # pragma: no cover - network fallback
+        return None, f"Failed to fetch portfolio for {address}: {exc}"
+
+    entries = _extract_portfolio_entries(portfolio)
+    segments: Dict[str, Any] = {}
+    for entry in entries:
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            key = str(entry[0]).lower()
+            segments[key] = entry[1]
+        elif isinstance(entry, dict):
+            key = entry.get("period") or entry.get("name")
+            if key:
+                segments[str(key).lower()] = entry
+
+    data = segments.get(period)
+    if not data:
+        return None, f"No portfolio data for period '{period}'."
+
+    pnl_history = data.get("pnlHistory")
+    if not pnl_history:
+        return None, f"PnL history unavailable for period '{period}'."
+
+    try:
+        start = Decimal(pnl_history[0][1])
+        end = Decimal(pnl_history[-1][1])
+    except Exception:
+        return None, "Unexpected PnL format returned by API."
+
+    pnl = end - start
+    return {"start": start, "end": end, "pnl": pnl, "period": period}, None
+
+
+def query_portfolio_pnl(address: str, period: str) -> str:
+    data, error = fetch_portfolio_pnl(address, period)
+    if error:
+        return error
+    return "\n".join(
+        [
+            f"PnL for {address}",
+            f"Period: {data['period']}",
+            f"Start: {format_notional(data['start'])}",
+            f"End: {format_notional(data['end'])}",
+            f"Net PnL: {format_notional(data['pnl'])}",
+        ]
+    )
 
 
 def read_coins_from_file(path: str) -> List[str]:
@@ -692,7 +781,7 @@ def run_tracker(args: argparse.Namespace) -> None:
                 return False, f"Failed to watch {normalized}: {exc}"
 
     for coin in coins:
-        added, message = subscribe_coin(coin)
+        _, message = subscribe_coin(coin)
         if message:
             print(message)
 
@@ -744,11 +833,15 @@ def run_tracker(args: argparse.Namespace) -> None:
             notifier,
             subscribe_coin,
             sentiment_callback,
+            lambda address,period: query_portfolio_pnl(address, period),
             cache,
             args.sentiment_lookback,
             stop_event,
         )
         cmd_handler.start()
+
+    pnl_cache: Dict[Tuple[str, str], Tuple[Optional[Decimal], float]] = {}
+    pnl_cache_ttl = 300  # seconds
 
     last_save = time.time()
     try:
@@ -778,6 +871,22 @@ def run_tracker(args: argparse.Namespace) -> None:
                     funding_effect = compute_funding_effect(
                         trade, ctx.funding_rate if ctx else None
                     )
+                    period_pnl_value: Optional[Decimal] = None
+                    if args.pnl_period:
+                        cache_key = (trade.users[0], args.pnl_period)
+                        cached = pnl_cache.get(cache_key)
+                        now = time.time()
+                        if cached and now - cached[1] < pnl_cache_ttl:
+                            period_pnl_value = cached[0]
+                        else:
+                            data, error = fetch_portfolio_pnl(
+                                trade.users[0], args.pnl_period
+                            )
+                            if data:
+                                period_pnl_value = data["pnl"]
+                                pnl_cache[cache_key] = (period_pnl_value, now)
+                            else:
+                                pnl_cache[cache_key] = (None, now)
                     headers = [
                         "Time (UTC)",
                         "Coin",
@@ -818,9 +927,15 @@ def run_tracker(args: argparse.Namespace) -> None:
                         if funding_effect is not None
                         else "N/A",
                     ]
-                    if args.show_users:
+                    if not args.hide_users:
                         headers += ["Taker", "Maker"]
                         row += [trade.users[0], trade.users[1]]
+                    if args.pnl_period:
+                        headers += [f"{args.pnl_period.capitalize()} PnL"]
+                        if period_pnl_value is not None:
+                            row.append(format_notional(period_pnl_value))
+                        else:
+                            row.append("N/A")
                     print_table(headers, [row])
 
                     alert_text = build_alert_text(
@@ -830,7 +945,9 @@ def run_tracker(args: argparse.Namespace) -> None:
                         pnl,
                         ctx.funding_rate if ctx else None,
                         funding_effect,
-                        include_users=args.show_users,
+                        include_users=not args.hide_users,
+                        period_pnl=period_pnl_value,
+                        pnl_period=args.pnl_period,
                     )
                     tracker_state.record_trade(alert_text)
 
@@ -903,9 +1020,14 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Seconds between cache flushes to disk (default: %(default)s)",
     )
     parser.add_argument(
-        "--show-users",
+        "--hide-users",
         action="store_true",
-        help="Display taker/maker addresses in alerts.",
+        help="Hide taker/maker addresses in alerts.",
+    )
+    parser.add_argument(
+        "--pnl-period",
+        choices=["day", "week", "month"],
+        help="When set, include the taker's PnL for the given period in alerts.",
     )
     parser.add_argument(
         "--telegram-token",
