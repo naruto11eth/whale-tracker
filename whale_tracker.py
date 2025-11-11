@@ -29,6 +29,7 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tu
 import requests
 
 from hyperliquid.info import Info
+from hyperliquid.utils.error import ClientError
 
 
 DEFAULT_THRESHOLD_USD = Decimal("10000000")  # $10M
@@ -237,13 +238,46 @@ def summarize_trade(trade: Trade) -> str:
     )
 
 
-def fetch_recent(info: Info, coin: str) -> List[Trade]:
-    try:
-        raw = info.post("/info", {"type": "recentTrades", "coin": coin})
-        return [Trade.from_raw(coin, item) for item in raw]
-    except Exception as exc:  # pragma: no cover - network failure fallback
-        print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
-        return []
+def fetch_recent(
+    info: Info,
+    coin: str,
+    *,
+    max_retries: int = 5,
+    backoff_seconds: float = 0.5,
+) -> List[Trade]:
+    delay = backoff_seconds
+    for attempt in range(1, max_retries + 1):
+        try:
+            raw = info.post("/info", {"type": "recentTrades", "coin": coin})
+            return [Trade.from_raw(coin, item) for item in raw]
+        except ClientError as exc:  # pragma: no cover - network failure fallback
+            if exc.status_code == 429 and attempt < max_retries:
+                sleep_for = delay
+                print(
+                    f"Rate limited while fetching {coin} trades (attempt {attempt}/{max_retries}). "
+                    f"Sleeping {sleep_for:.2f}s."
+                )
+                time.sleep(sleep_for)
+                delay = min(delay * 2, 10)
+                continue
+            print(
+                f"Failed to pull recent trades for {coin}: HTTP {exc.status_code} {exc.error_message}",
+                file=sys.stderr,
+            )
+            break
+        except Exception as exc:  # pragma: no cover - defensive retry path
+            if attempt < max_retries:
+                sleep_for = delay
+                print(
+                    f"Fetch attempt {attempt}/{max_retries} for {coin} failed ({exc}); retrying in {sleep_for:.2f}s.",
+                    file=sys.stderr,
+                )
+                time.sleep(sleep_for)
+                delay = min(delay * 2, 10)
+                continue
+            print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
+            break
+    return []
 
 
 @dataclass
