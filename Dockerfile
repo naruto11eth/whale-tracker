@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "whale_tracker.py", "--coins", "all", "--threshold", "10000000"]
+CMD ["python", "whale_tracker.py", "--coins", "all", "--threshold", "10000000", "--pnl-period", "day"]
