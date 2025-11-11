@@ -29,8 +29,9 @@ Key options:
 - `--env-file secrets.env` Load a custom `.env` file (defaults to `.env` when present).
 - `--threshold 15000000` USD notional threshold (default `10000000`).
 - `--lookback-hours 12` Retention horizon for the cached trades.
-- `--show-users` Include taker/maker addresses in the output table.
+- `--hide-users` Skip printing taker/maker addresses (default is to include them).
 - `--telegram-token / --telegram-chat-id` Send whale alerts to a Telegram bot/chat.
+- `--pnl-period day|week|month` Annotate alerts with the taker’s portfolio PnL for that timeframe.
 - `--storage-file custom_cache.json` Explicit cache file path. When omitted a timestamped `trade_cache_YYYYmmdd_HHMMSS.json` is created automatically each run.
 - `--sentiment COIN` Print long/short flow mix for a coin and exit.
 - `--sentiment-lookback 6` Lookback (in hours) used for sentiment mode.
@@ -101,6 +102,7 @@ Once the bot is in a chat you can control it without restarting the tracker:
 - `/last_10_trades`, `/last_20_trades`, `/last_50_trades` – dump the most recent cached whale alerts.
 - `/coin_watcher BTC` – subscribe to a new coin on the fly.
 - `/market_sentiment ETH` – show the cached sentiment summary for any coin.
+- `/pnl_of_address 0xabc… day|week|month` – pull the portfolio PnL summary for any account.
 
 When auto alerts are off the tracker still records trades (up to 500) so you can pull them on demand with the `/last_*` commands.
 
