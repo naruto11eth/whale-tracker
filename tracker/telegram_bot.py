@@ -22,7 +22,11 @@ class TelegramNotifier:
         self.thread_id = thread_id
         self.endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
 
-    def send(self, text: str) -> None:
+    def send(
+        self,
+        text: str,
+        buttons: Optional[List[List[Dict[str, Any]]]] = None,
+    ) -> None:
         try:
             payload = {
                 "chat_id": self.chat_id,
@@ -31,6 +35,8 @@ class TelegramNotifier:
             }
             if self.thread_id is not None:
                 payload["message_thread_id"] = self.thread_id
+            if buttons:
+                payload["reply_markup"] = {"inline_keyboard": buttons}
             resp = requests.post(self.endpoint, json=payload, timeout=15)
             resp.raise_for_status()
         except Exception as exc:  # pragma: no cover
