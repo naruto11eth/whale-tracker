@@ -32,6 +32,7 @@ from .hyperliquid_client import (
     fetch_recent,
 )
 from .pnl import fetch_portfolio_pnl, query_portfolio_pnl
+from .positions import format_positions_report
 from .telegram_bot import (
     TelegramCommandHandler,
     TelegramNotifier,
@@ -285,6 +286,9 @@ def run_tracker(args: argparse.Namespace) -> None:
     def sentiment_callback(symbol: str, cache_ref: TradeCache = cache) -> str:
         return compute_sentiment_summary(symbol, cache_ref, args.sentiment_lookback)
 
+    def positions_callback(address: str, limit: int = 5) -> str:
+        return format_positions_report(address, limit)
+
     if notifier and args.telegram_token and args.telegram_chat_id:
         cmd_handler = TelegramCommandHandler(
             args.telegram_token,
@@ -295,6 +299,7 @@ def run_tracker(args: argparse.Namespace) -> None:
             subscribe_coin,
             sentiment_callback,
             lambda address, period: query_portfolio_pnl(address, period),
+            positions_callback,
             cache,
             args.sentiment_lookback,
             stop_event,
