@@ -40,7 +40,7 @@ class TelegramNotifier:
 class TrackerState:
     def __init__(self, history_limit: int = 500) -> None:
         self._history: Deque[str] = deque(maxlen=history_limit)
-        self._auto_watch = True
+        self._auto_watch = False
         self._pnl_period: Optional[str] = None
         self._lock = threading.Lock()
 
@@ -84,6 +84,7 @@ class TelegramCommandHandler:
         subscribe_fn: Callable[[str], tuple[bool, Optional[str]]],
         sentiment_fn: Callable[[str], str],
         pnl_fn: Callable[[str, str], str],
+        positions_fn: Callable[[str, int], str],
         cache: TradeCache,
         lookback_hours: float,
         stop_event: threading.Event,
@@ -96,6 +97,7 @@ class TelegramCommandHandler:
         self.subscribe_fn = subscribe_fn
         self.sentiment_fn = sentiment_fn
         self.pnl_fn = pnl_fn
+        self.positions_fn = positions_fn
         self.cache = cache
         self.lookback_hours = lookback_hours
         self.stop_event = stop_event
@@ -180,6 +182,22 @@ class TelegramCommandHandler:
             self.notifier.send(self.pnl_fn(address, period))
         elif command in {"/pnl_period", "/set_pnl_period", "/pnlperiod"}:
             self._handle_pnl_period_command(args)
+        elif command in {"/positions", "/position"}:
+            if not args:
+                self.notifier.send("Usage: /positions ADDRESS [limit]")
+                return
+            address = args[0]
+            limit = 5
+            if len(args) > 1:
+                try:
+                    limit = max(1, min(20, int(args[1])))
+                except ValueError:
+                    pass
+            report = self.positions_fn(address, limit)
+            print(report)
+            self.notifier.send(report)
+        elif command in {"/help", "/commands"}:
+            self._send_help()
         else:
             if command.startswith("/last_") and command.endswith("_trades"):
                 try:
@@ -215,6 +233,20 @@ class TelegramCommandHandler:
         else:
             allowed = ", ".join(sorted(VALID_PNL_PERIODS))
             self.notifier.send(f"Invalid period. Choose one of: {allowed}, or 'off'.")
+
+
+    def _send_help(self) -> None:
+        commands = [
+            "/turn_on_auto_watcher – resume live alerts",
+            "/turn_off_auto_watcher – pause live alerts (still records)",
+            "/last_10_trades, /last_20_trades, /last_50_trades – show cached alerts",
+            "/coin_watcher COIN – add a new coin to the watch list",
+            "/market_sentiment COIN – show cached sentiment",
+            "/pnl_of_address ADDRESS [period] – address PnL (day/week/month/all)",
+            "/pnl_period period|off – change default PnL overlay",
+            "/positions ADDRESS [limit] – open positions + recent fills",
+        ]
+        self.notifier.send("Commands:\n" + "\n".join(commands))
 
 
 def compute_sentiment_summary(coin: str, cache: TradeCache, lookback_hours: float) -> str:
