@@ -19,3 +19,16 @@ _PERIOD_ALIAS_GROUPS = {
     "all": {"all", "alltime", "all_time", "lifetime", "overall", "total"},
 }
 
+FETCH_SKIP_FAILURE_THRESHOLD = 3
+FETCH_SKIP_DURATION_SECONDS = 300
+
+
+def canonical_period_key(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+PERIOD_ALIAS_LOOKUP: Dict[str, Set[str]] = {}
+for key, aliases in _PERIOD_ALIAS_GROUPS.items():
+    canonical_key = canonical_period_key(key)
+    PERIOD_ALIAS_LOOKUP[canonical_key] = {canonical_period_key(alias) for alias in aliases}
+    PERIOD_ALIAS_LOOKUP[canonical_key].add(canonical_key)
