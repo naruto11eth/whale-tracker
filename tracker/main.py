@@ -115,3 +115,50 @@ def print_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
     print()
 
 
+def build_alert_text(
+    trade: Trade,
+    mark_px: Optional[Decimal],
+    mid_px: Optional[Decimal],
+    pnl_vs_mark: Optional[Decimal],
+    funding_rate: Optional[Decimal],
+    funding_effect: Optional[Decimal],
+    *,
+    include_users: bool,
+    period_pnl: Optional[Decimal],
+    pnl_period: Optional[str],
+) -> str:
+    direction = trade.direction.upper()
+    parts = [
+        f"<b>{trade.coin}</b> {direction}",
+        "",
+        f"Size: {trade.size.normalize()} @ {trade.price.normalize()} ({format_notional(trade.notional_usd)})",
+    ]
+    if mark_px is not None:
+        parts.append(f"Mark: {mark_px.normalize()}")
+    if mid_px is not None:
+        parts.append(f"Mid: {mid_px.normalize()}")
+    if pnl_vs_mark is not None:
+        parts.append(f"PnL vs mark: {format_notional(pnl_vs_mark)}")
+    if funding_rate is not None:
+        rate_pct = funding_rate * Decimal(100)
+        parts.append(f"Funding: {rate_pct:.4f}%")
+    if funding_effect is not None:
+        parts.append(f"Funding impact: {format_notional(funding_effect)}")
+    if include_users:
+        parts.append(f"Taker: {trade.users[0]}\nMaker: {trade.users[1]}")
+    if period_pnl is not None and pnl_period:
+        parts.append(f"{pnl_period.capitalize()} PnL: {format_notional(period_pnl)}")
+    parts.append("")
+    parts.append(f"Trade: https://app.hyperliquid.xyz/trade/{trade.coin}")
+    return "\n".join(parts)
+
+
+def resolve_storage_path(user_path: Optional[str], cache_dir: str) -> str:
+    if user_path:
+        return user_path
+    os.makedirs(cache_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    return os.path.join(cache_dir, f"trade_cache_{timestamp}.json")
+
+
+
