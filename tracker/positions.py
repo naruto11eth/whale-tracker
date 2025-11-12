@@ -8,8 +8,6 @@ from typing import List, Optional
 
 from hyperliquid.info import Info
 
-from .cache import format_notional
-
 
 @dataclass
 class Position:
@@ -19,7 +17,6 @@ class Position:
     entry_px: Optional[Decimal]
     liquidation_px: Optional[Decimal]
     leverage: Optional[str]
-    unrealized_pnl: Optional[Decimal]
 
 
 @dataclass
@@ -29,7 +26,6 @@ class Fill:
     size: Decimal
     price: Decimal
     timestamp_ms: int
-    closed_pnl: Optional[Decimal]
 
     @property
     def direction(self) -> str:
@@ -79,7 +75,6 @@ def fetch_open_positions(address: str) -> List[Position]:
         leverage = None
         if lev_type and lev_value is not None:
             leverage = f"{lev_type}:{lev_value}"
-        unrealized = _decimal_or_none(pos.get("unrealizedPnl"))
         positions.append(
             Position(
                 coin=coin,
@@ -88,9 +83,30 @@ def fetch_open_positions(address: str) -> List[Position]:
                 entry_px=entry_px,
                 liquidation_px=liq_px,
                 leverage=leverage,
-                unrealized_pnl=unrealized,
             )
         )
     positions.sort(key=lambda p: p.size, reverse=True)
     return positions
+
+
+def fetch_recent_fills(address: str, limit: int = 5) -> List[Fill]:
+    info = Info(skip_ws=True)
+    fills_raw = info.user_fills(address)
+    fills: List[Fill] = []
+    for item in fills_raw:
+        try:
+            fills.append(
+                Fill(
+                    coin=item.get("coin", ""),
+                    side=item.get("side", ""),
+                    size=Decimal(item.get("sz", "0")),
+                    price=Decimal(item.get("px", "0")),
+                    timestamp_ms=int(item.get("time", 0)),
+                )
+            )
+        except Exception:
+            continue
+    fills.sort(key=lambda f: f.timestamp_ms, reverse=True)
+    return fills[:limit]
+
 
