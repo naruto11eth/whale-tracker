@@ -137,3 +137,116 @@ class TelegramCommandHandler:
                     self._handle_command(text.strip())
             except Exception:  # pragma: no cover
                 time.sleep(5)
+
+    def _handle_command(self, text: str) -> None:
+        parts = text.split()
+        if not parts:
+            return
+        command = parts[0].split("@")[0].lower()
+        args = parts[1:]
+
+        if command in {"/turn_on_auto_watcher", "/turnonauto", "/auto_on"}:
+            self.state.set_auto_watch(True)
+            self.notifier.send("Auto watcher enabled.")
+        elif command in {"/turn_off_auto_watcher", "/turnoffauto", "/auto_off"}:
+            self.state.set_auto_watch(False)
+            self.notifier.send("Auto watcher disabled. Trades will still be recorded.")
+        elif command in {"/last_10_trades", "/last10"}:
+            self._send_recent_trades(10)
+        elif command in {"/last_20_trades", "/last20"}:
+            self._send_recent_trades(20)
+        elif command in {"/last_50_trades", "/last50"}:
+            self._send_recent_trades(50)
+        elif command == "/market_sentiment":
+            if not args:
+                self.notifier.send("Usage: /market_sentiment COIN")
+                return
+            coin = args[0].upper()
+            summary = self.sentiment_fn(coin)
+            self.notifier.send(summary)
+        elif command == "/coin_watcher":
+            if not args:
+                self.notifier.send("Usage: /coin_watcher COIN")
+                return
+            coin = args[0].upper()
+            added, message = self.subscribe_fn(coin)
+            self.notifier.send(message if message else f"Watching {coin}.")
+        elif command == "/pnl_of_address":
+            if not args:
+                self.notifier.send("Usage: /pnl_of_address ADDRESS [day|week|month|all]")
+                return
+            address = args[0]
+            period = args[1].lower() if len(args) > 1 else "day"
+            self.notifier.send(self.pnl_fn(address, period))
+        elif command in {"/pnl_period", "/set_pnl_period", "/pnlperiod"}:
+            self._handle_pnl_period_command(args)
+        else:
+            if command.startswith("/last_") and command.endswith("_trades"):
+                try:
+                    count = int(command.split("_")[1])
+                    self._send_recent_trades(count)
+                    return
+                except ValueError:
+                    pass
+            self.notifier.send("Unknown command.")
+
+    def _send_recent_trades(self, count: int) -> None:
+        entries = self.state.recent_trades(count)
+        if not entries:
+            self.notifier.send("No trades recorded yet.")
+            return
+        self.notifier.send("\n\n".join(entries))
+
+    def _handle_pnl_period_command(self, args: Sequence[str]) -> None:
+        if not args:
+            current = self.state.get_pnl_period() or "disabled"
+            self.notifier.send(
+                "Usage: /pnl_period day|week|month|all|off\n"
+                f"Current: {current}"
+            )
+            return
+        choice = args[0].lower()
+        if choice in VALID_PNL_PERIODS:
+            self.state.set_pnl_period(choice)
+            self.notifier.send(f"PnL period set to {choice}.")
+        elif choice in {"off", "none", "disable", "disabled"}:
+            self.state.set_pnl_period(None)
+            self.notifier.send("PnL overlay disabled.")
+        else:
+            allowed = ", ".join(sorted(VALID_PNL_PERIODS))
+            self.notifier.send(f"Invalid period. Choose one of: {allowed}, or 'off'.")
+
+
+def compute_sentiment_summary(coin: str, cache: TradeCache, lookback_hours: float) -> str:
+    normalized = coin.upper()
+    trades = cache.recent(normalized)
+    if len(trades) < 20:
+        try:
+            info = Info(skip_ws=True)
+            for trade in fetch_recent(info, normalized):
+                cache.add(trade)
+            trades = cache.recent(normalized)
+        except Exception as exc:  # pragma: no cover
+            return f"Sentiment fetch failed for {normalized}: {exc}"
+
+    if not trades:
+        return f"No trades available for {normalized} in the current lookback window."
+
+    total = len(trades)
+    longs = [t for t in trades if t.direction == "long"]
+    shorts = [t for t in trades if t.direction == "short"]
+
+    long_notional = sum((t.notional_usd for t in longs), Decimal("0"))
+    short_notional = sum((t.notional_usd for t in shorts), Decimal("0"))
+
+    long_pct = (len(longs) / total * 100) if total else 0
+    short_pct = (len(shorts) / total * 100) if total else 0
+
+    lines = [
+        f"Sentiment for {normalized}",
+        f"Window: last {lookback_hours:g}h of cached data",
+        f"Total trades: {total}",
+        f"Longs: {len(longs)} ({long_pct:.2f}%) | Volume: {format_notional(long_notional)}",
+        f"Shorts: {len(shorts)} ({short_pct:.2f}%) | Volume: {format_notional(short_notional)}",
+    ]
+    return "\n".join(lines)
