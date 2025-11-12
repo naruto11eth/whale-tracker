@@ -110,3 +110,38 @@ def fetch_recent_fills(address: str, limit: int = 5) -> List[Fill]:
     return fills[:limit]
 
 
+def format_positions_report(address: str, history_limit: int = 5) -> str:
+    try:
+        open_positions = fetch_open_positions(address)
+    except Exception as exc:
+        return f"Failed to fetch positions for {address}: {exc}"
+
+    try:
+        history = fetch_recent_fills(address, history_limit)
+    except Exception:
+        history = []
+
+    lines: List[str] = [f"Positions for {address}"]
+    if open_positions:
+        lines.append("\n<b>Open Positions</b>")
+        lines.append("Coin | Dir | Size | Entry Px | Liq Px | Leverage")
+        for pos in open_positions:
+            lines.append(
+                f"{pos.coin} | {pos.direction.upper()} | {pos.size.normalize()} | "
+                f"{_fmt_decimal(pos.entry_px)} | {_fmt_decimal(pos.liquidation_px)} | {pos.leverage or '-'}"
+            )
+    else:
+        lines.append("\nNo open perp positions.")
+
+    if history:
+        lines.append("\n<b>Recent Fills</b>")
+        for fill in history:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(fill.timestamp_ms / 1000))
+            lines.append(
+                f"[{ts} UTC] {fill.coin} {fill.direction.upper()} "
+                f"{fill.size.normalize()} @ {fill.price.normalize()}"
+            )
+    else:
+        lines.append("\nNo recent fills available.")
+
+    return "\n".join(lines)
