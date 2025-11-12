@@ -57,3 +57,71 @@ def _record_fetch_success(coin: str) -> None:
         _fetch_skip_until.pop(normalized, None)
 
 
+def fetch_recent(
+    info: Info,
+    coin: str,
+    *,
+    max_retries: int = 5,
+    backoff_seconds: float = 0.5,
+) -> List[Trade]:
+    remaining = _remaining_skip_seconds(coin)
+    if remaining > 0:
+        print(
+            f"Skipping {coin.upper()} fetch; cooling down for {int(remaining)}s due to repeated API errors.",
+            file=sys.stderr,
+        )
+        return []
+
+    delay = backoff_seconds
+    for attempt in range(1, max_retries + 1):
+        try:
+            raw = info.post("/info", {"type": "recentTrades", "coin": coin})
+            trades = [Trade.from_raw(coin, item) for item in raw]
+            _record_fetch_success(coin)
+            return trades
+        except ClientError as exc:
+            if exc.status_code == 429 and attempt < max_retries:
+                print(
+                    f"Rate limited while fetching {coin} trades (attempt {attempt}/{max_retries}). "
+                    f"Sleeping {delay:.2f}s.",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 10)
+                continue
+            print(
+                f"Failed to pull recent trades for {coin}: HTTP {exc.status_code} {exc.error_message}",
+                file=sys.stderr,
+            )
+            break
+        except ServerError as exc:
+            if exc.status_code == 500:
+                _record_fetch_failure(coin, f"HTTP {exc.status_code}")
+                if attempt < max_retries:
+                    print(
+                        f"Server error while fetching {coin} trades (attempt {attempt}/{max_retries}). "
+                        f"Sleeping {delay:.2f}s.",
+                        file=sys.stderr,
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 10)
+                    continue
+            print(
+                f"Failed to pull recent trades for {coin}: HTTP {exc.status_code} {exc.message}",
+                file=sys.stderr,
+            )
+            break
+        except Exception as exc:  # pragma: no cover
+            if attempt < max_retries:
+                print(
+                    f"Fetch attempt {attempt}/{max_retries} for {coin} failed ({exc}); retrying in {delay:.2f}s.",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 10)
+                continue
+            print(f"Failed to pull recent trades for {coin}: {exc}", file=sys.stderr)
+            break
+    return []
+
+
