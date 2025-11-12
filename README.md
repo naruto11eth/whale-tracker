@@ -45,6 +45,43 @@ python3 whale_tracker.py --coins BTC ETH --threshold 20000000 --show-users
 
 Run the tracker continuously (e.g. via tmux/systemd) to accumulate trades beyond the REST endpoint’s last-10 limit. Each run writes to its own cache file unless you pass `--storage-file` to reuse a prior dataset.
 
+> Auto alerts now start **off**; send `/turn_on_auto_watcher` after the bot joins a chat if you want prints to resume immediately.
+
+### Common CLI Commands
+
+- **Quick local watch (BTC/ETH, $200k+)**
+  ```bash
+  python3 whale_tracker.py --coins BTC ETH --threshold 200000 \
+      --cache-dir cache --pnl-period day
+  ```
+
+- **Monitor every coin with full feed + weekly PnL column**
+  ```bash
+  python3 whale_tracker.py --coins all --threshold 0 \
+      --cache-dir cache --pnl-period week
+  ```
+
+- **Telegram deployment using a coins file**
+  ```bash
+  python3 whale_tracker.py --coins-file coins.txt --threshold 150000 \
+      --telegram-token "$TELEGRAM_BOT_TOKEN" \
+      --telegram-chat-id "$TELEGRAM_CHAT_ID" \
+      --cache-dir cache --pnl-period all
+  ```
+
+- **Sentiment-only mode**
+  ```bash
+  python3 whale_tracker.py --sentiment SOL --sentiment-lookback 6
+  ```
+
+- **Custom cache reuse**
+  ```bash
+  python3 whale_tracker.py --coins BTC ETH \
+      --storage-file cache/btc_eth_cache.json --threshold 500000
+  ```
+
+
+
 ### Monitoring All Coins
 
 You can launch the tracker for every listed perp by discovering the universe at runtime:
@@ -102,7 +139,9 @@ Once the bot is in a chat you can control it without restarting the tracker:
 - `/last_10_trades`, `/last_20_trades`, `/last_50_trades` – dump the most recent cached whale alerts.
 - `/coin_watcher BTC` – subscribe to a new coin on the fly.
 - `/market_sentiment ETH` – show the cached sentiment summary for any coin.
-- `/pnl_of_address 0xabc… day|week|month` – pull the portfolio PnL summary for any account.
+- `/pnl_of_address 0xabc… day|week|month|all` – pull the portfolio PnL summary for any account over the requested window.
+- `/pnl_period day|week|month|all|off` – change the global PnL overlay without restarting the bot (use `off` to hide it).
+- `/positions 0xabc… [limit]` – show current positions plus recent fills (limit defaults to 5).
 
 When auto alerts are off the tracker still records trades (up to 500) so you can pull them on demand with the `/last_*` commands.
 
