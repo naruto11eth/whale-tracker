@@ -30,3 +30,10 @@ def load_env_file(path: str) -> None:
         print(f"Warning: could not read env file {path}: {exc}", file=sys.stderr)
 
 
+def to_decimal(value: Optional[str]) -> Optional[Decimal]:
+    if value is None:
+        return None
+    try:
+        return Decimal(value)
+    except (InvalidOperation, TypeError):
+        return None
