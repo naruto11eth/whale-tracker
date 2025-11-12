@@ -128,7 +128,7 @@ def format_positions_report(address: str, history_limit: int = 5) -> str:
     except Exception:
         history = []
 
-    lines: List[str] = [f"Positions for {address}"]
+    lines: List[str] = [f"<b>Positions for {address}</b>"]
     if open_positions:
         lines.append("\n<b>Open Positions</b>")
         lines.append("Coin | Dir | Size | Entry Px | Liq Px | Leverage | Unrealized PnL")
@@ -144,24 +144,28 @@ def format_positions_report(address: str, history_limit: int = 5) -> str:
                 f"{format_notional(pos.unrealized_pnl) if pos.unrealized_pnl is not None else '-'}"
             )
         if has_pnl:
-            lines.append(f"Total unrealized PnL: {format_notional(total_pnl)}")
+            lines.append(f"<b>Total unrealized PnL: {format_notional(total_pnl)}</b>")
     else:
         lines.append("\nNo open perp positions.")
 
     if history:
         lines.append("\n<b>Recent Fills</b>")
+        total_realized = Decimal("0")
+        has_realized = False
         for fill in history:
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(fill.timestamp_ms / 1000))
-            pnl_text = (
-                f" | Realized PnL: {format_notional(fill.closed_pnl)}"
-                if fill.closed_pnl is not None
-                else ""
-            )
+            pnl_text = ""
+            if fill.closed_pnl is not None:
+                total_realized += fill.closed_pnl
+                has_realized = True
+                pnl_text = f" | Realized PnL: {format_notional(fill.closed_pnl)}"
             lines.append(
                 f"[{ts} UTC] {fill.coin} {fill.direction.upper()} "
                 f"{fill.size.normalize()} @ {fill.price.normalize()}"
                 + pnl_text
             )
+        if has_realized:
+            lines.append(f"<b>Total realized PnL: {format_notional(total_realized)}</b>")
     else:
         lines.append("\nNo recent fills available.")
 
