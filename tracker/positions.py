@@ -8,6 +8,8 @@ from typing import List, Optional
 
 from hyperliquid.info import Info
 
+from .cache import format_notional
+
 
 @dataclass
 class Position:
@@ -17,6 +19,7 @@ class Position:
     entry_px: Optional[Decimal]
     liquidation_px: Optional[Decimal]
     leverage: Optional[str]
+    unrealized_pnl: Optional[Decimal]
 
 
 @dataclass
@@ -26,6 +29,7 @@ class Fill:
     size: Decimal
     price: Decimal
     timestamp_ms: int
+    closed_pnl: Optional[Decimal]
 
     @property
     def direction(self) -> str:
@@ -75,6 +79,7 @@ def fetch_open_positions(address: str) -> List[Position]:
         leverage = None
         if lev_type and lev_value is not None:
             leverage = f"{lev_type}:{lev_value}"
+        unrealized = _decimal_or_none(pos.get("unrealizedPnl"))
         positions.append(
             Position(
                 coin=coin,
@@ -83,6 +88,7 @@ def fetch_open_positions(address: str) -> List[Position]:
                 entry_px=entry_px,
                 liquidation_px=liq_px,
                 leverage=leverage,
+                unrealized_pnl=unrealized,
             )
         )
     positions.sort(key=lambda p: p.size, reverse=True)
@@ -102,6 +108,7 @@ def fetch_recent_fills(address: str, limit: int = 5) -> List[Fill]:
                     size=Decimal(item.get("sz", "0")),
                     price=Decimal(item.get("px", "0")),
                     timestamp_ms=int(item.get("time", 0)),
+                    closed_pnl=_decimal_or_none(item.get("closedPnl")),
                 )
             )
         except Exception:
@@ -124,12 +131,20 @@ def format_positions_report(address: str, history_limit: int = 5) -> str:
     lines: List[str] = [f"Positions for {address}"]
     if open_positions:
         lines.append("\n<b>Open Positions</b>")
-        lines.append("Coin | Dir | Size | Entry Px | Liq Px | Leverage")
+        lines.append("Coin | Dir | Size | Entry Px | Liq Px | Leverage | Unrealized PnL")
+        total_pnl = Decimal("0")
+        has_pnl = False
         for pos in open_positions:
+            if pos.unrealized_pnl is not None:
+                total_pnl += pos.unrealized_pnl
+                has_pnl = True
             lines.append(
                 f"{pos.coin} | {pos.direction.upper()} | {pos.size.normalize()} | "
-                f"{_fmt_decimal(pos.entry_px)} | {_fmt_decimal(pos.liquidation_px)} | {pos.leverage or '-'}"
+                f"{_fmt_decimal(pos.entry_px)} | {_fmt_decimal(pos.liquidation_px)} | {pos.leverage or '-'} | "
+                f"{format_notional(pos.unrealized_pnl) if pos.unrealized_pnl is not None else '-'}"
             )
+        if has_pnl:
+            lines.append(f"Total unrealized PnL: {format_notional(total_pnl)}")
     else:
         lines.append("\nNo open perp positions.")
 
@@ -137,9 +152,15 @@ def format_positions_report(address: str, history_limit: int = 5) -> str:
         lines.append("\n<b>Recent Fills</b>")
         for fill in history:
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(fill.timestamp_ms / 1000))
+            pnl_text = (
+                f" | Realized PnL: {format_notional(fill.closed_pnl)}"
+                if fill.closed_pnl is not None
+                else ""
+            )
             lines.append(
                 f"[{ts} UTC] {fill.coin} {fill.direction.upper()} "
                 f"{fill.size.normalize()} @ {fill.price.normalize()}"
+                + pnl_text
             )
     else:
         lines.append("\nNo recent fills available.")
