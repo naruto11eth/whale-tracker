@@ -146,11 +146,15 @@ def build_alert_text(
     if funding_effect is not None:
         parts.append(f"Funding impact: {format_notional(funding_effect)}")
     if include_users:
-        parts.append(f"Taker: {trade.users[0]}\nMaker: {trade.users[1]}")
+        taker = trade.users[0] or "-"
+        maker = trade.users[1] or "-"
+        if taker != "-":
+            taker = f"<code>{taker}</code>"
+        if maker != "-":
+            maker = f"<code>{maker}</code>"
+        parts.append(f"Taker: {taker}\nMaker: {maker}")
     if period_pnl is not None and pnl_period:
         parts.append(f"{pnl_period.capitalize()} PnL: {format_notional(period_pnl)}")
-    parts.append("")
-    parts.append(f"Trade: https://app.hyperliquid.xyz/trade/{trade.coin}")
     return "\n".join(parts)
 
 
@@ -399,10 +403,22 @@ def run_tracker(args: argparse.Namespace) -> None:
                         period_pnl=period_pnl_value,
                         pnl_period=period_setting,
                     )
+
+                    copy_buttons = None
+                    if not args.hide_users:
+                        button_row = []
+                        taker_addr = trade.users[0]
+                        maker_addr = trade.users[1]
+                        if taker_addr:
+                            button_row.append({"text": "Copy Taker", "copy_text": {"text": taker_addr}})
+                        if maker_addr:
+                            button_row.append({"text": "Copy Maker", "copy_text": {"text": maker_addr}})
+                        if button_row:
+                            copy_buttons = [button_row]
                     tracker_state.record_trade(alert_text)
 
                     if notifier and tracker_state.is_auto_watch():
-                        notifier.send(alert_text)
+                        notifier.send(alert_text, buttons=copy_buttons)
 
         while not trade_queue.empty():
             try:
