@@ -414,3 +414,13 @@ def run_tracker(args: argparse.Namespace) -> None:
             pass
 
 
+def run_sentiment(args: argparse.Namespace) -> None:
+    if not args.sentiment:
+        print("Please provide --sentiment COIN")
+        return
+    cache = load_cache(args.storage_file, int(args.sentiment_lookback * 3600))
+    summary = compute_sentiment_summary(args.sentiment, cache, args.sentiment_lookback)
+    print(summary)
+
+
+
