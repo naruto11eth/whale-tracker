@@ -423,4 +423,124 @@ def run_sentiment(args: argparse.Namespace) -> None:
     print(summary)
 
 
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="HyperLiquid whale tracker")
+    parser.add_argument(
+        "--coins",
+        nargs="*",
+        default=["BTC", "ETH"],
+        help="List of coins to monitor (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--coins-file",
+        help="Optional text file with additional coin symbols (one per line or space-separated).",
+    )
+    parser.add_argument(
+        "--env-file",
+        help="Optional .env file to load (defaults to .env if present).",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=Decimal,
+        default=DEFAULT_THRESHOLD_USD,
+        help="Notional USD threshold for highlighting trades (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--lookback-hours",
+        type=float,
+        default=DEFAULT_LOOKBACK_HOURS,
+        help="Hours to retain trades in memory and cache (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--storage-file",
+        default=DEFAULT_STORAGE_PATH,
+        help="Optional cache file path (default: auto-generated trade_cache_TIMESTAMP.json)",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=DEFAULT_CACHE_DIR,
+        help="Directory where auto-generated cache files should be written (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=DEFAULT_SAVE_INTERVAL_SECONDS,
+        help="Seconds between cache flushes to disk (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--hide-users",
+        action="store_true",
+        help="Hide taker/maker addresses in alerts.",
+    )
+    parser.add_argument(
+        "--pnl-period",
+        choices=sorted(VALID_PNL_PERIODS),
+        help="When set, include the taker's PnL for the given period in alerts.",
+    )
+    parser.add_argument(
+        "--telegram-token",
+        default=os.getenv("TELEGRAM_BOT_TOKEN"),
+        help="Telegram bot token for alerts (defaults to TELEGRAM_BOT_TOKEN env).",
+    )
+    parser.add_argument(
+        "--telegram-chat-id",
+        default=os.getenv("TELEGRAM_CHAT_ID"),
+        help="Telegram chat ID for alerts (defaults to TELEGRAM_CHAT_ID env).",
+    )
+    parser.add_argument(
+        "--telegram-thread-id",
+        default=os.getenv("TELEGRAM_THREAD_ID"),
+        help="Optional Telegram topic/thread ID for forum groups (defaults to TELEGRAM_THREAD_ID env).",
+    )
+    parser.add_argument(
+        "--sentiment",
+        help="Print sentiment for the specified coin and exit.",
+    )
+    parser.add_argument(
+        "--sentiment-lookback",
+        type=float,
+        default=DEFAULT_LOOKBACK_HOURS,
+        help="Lookback window in hours for sentiment mode (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--no-startup-summary",
+        action="store_false",
+        dest="print_startup_summary",
+        help="Skip listing cached large trades on startup.",
+    )
+    parser.set_defaults(print_startup_summary=True)
+    return parser.parse_args(argv)
 
+
+def main() -> None:
+    args = parse_args()
+    if args.env_file:
+        load_env_file(args.env_file)
+        if not args.telegram_token:
+            args.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not args.telegram_chat_id:
+            args.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not args.telegram_thread_id:
+            args.telegram_thread_id = os.getenv("TELEGRAM_THREAD_ID")
+
+    thread_id_value: Optional[int] = None
+    if args.telegram_thread_id:
+        try:
+            thread_id_value = int(str(args.telegram_thread_id).strip())
+        except ValueError as exc:
+            raise SystemExit(
+                f"Invalid telegram thread id '{args.telegram_thread_id}': {exc}"
+            )
+    args.telegram_thread_id = thread_id_value
+
+    args.storage_file = resolve_storage_path(args.storage_file, args.cache_dir)
+    print(f"Using cache file: {args.storage_file}")
+
+    if args.sentiment:
+        run_sentiment(args)
+    else:
+        run_tracker(args)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
