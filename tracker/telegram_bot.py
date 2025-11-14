@@ -139,6 +139,9 @@ class TelegramCommandHandler:
                     chat = message.get("chat") or {}
                     if str(chat.get("id")) != self.chat_id:
                         continue
+                    thread_id = message.get("message_thread_id")
+                    if self.thread_id is not None and thread_id != self.thread_id:
+                        continue
                     text = message.get("text") or message.get("caption")
                     if not text:
                         continue
@@ -147,6 +150,8 @@ class TelegramCommandHandler:
                 time.sleep(5)
 
     def _handle_command(self, text: str) -> None:
+        if not text.startswith("/"):
+            return
         parts = text.split()
         if not parts:
             return
